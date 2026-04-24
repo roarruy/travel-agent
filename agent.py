@@ -9,6 +9,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
+import httpx
 import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -29,6 +30,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "SEU_TOKEN_AQUI")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "SUA_CHAVE_AQUI")
 AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID", "")
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET", "")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 
 # IDs do Telegram autorizados (só você e quem quiser autorizar)
 AUTHORIZED_USERS = [int(x) for x in os.getenv("AUTHORIZED_USERS", "0").split(",")]
@@ -450,15 +452,15 @@ async def tool_buscar_milhas_voo(params: dict, profile: dict) -> str:
 
 async def tool_buscar_hoteis(params: dict, profile: dict) -> str:
     """
-    Busca hotéis via Booking Affiliate API ou dados simulados.
-    Em produção: usar https://developers.booking.com ou Amadeus Hotel Search API
+    Busca hotéis reais via RapidAPI (Booking.com).
+    Retorna opções com preços reais, avaliações e link direto para reserva.
     """
     destino = params.get("destino", "")
     checkin = params.get("checkin", "")
     checkout = params.get("checkout", "")
     categoria = params.get("categoria", "4_estrelas")
-    cafe = params.get("cafe_da_manha", False)
-    cancelamento = params.get("cancelamento_gratis", True)
+    adultos = params.get("adultos", 1)
+    quartos = params.get("quartos", 1)
 
     # Calcular noites
     try:
@@ -468,54 +470,138 @@ async def tool_buscar_hoteis(params: dict, profile: dict) -> str:
     except Exception:
         noites = 1
 
-    results = {
-        "busca": f"{destino} | {checkin} → {checkout} ({noites} noite{'s' if noites > 1 else ''})",
-        "filtros": {"categoria": categoria, "cafe_da_manha": cafe, "cancelamento_gratis": cancelamento},
-        "opcoes": [
-            {
-                "nome": "Grand Hyatt São Paulo" if "paulo" in destino.lower() else f"Marriott {destino}",
-                "categoria": "5 estrelas",
-                "bairro": "Bela Vista" if "paulo" in destino.lower() else "Centro",
-                "avaliacao": 9.1,
-                "preco_noite": 850,
-                "preco_total": 850 * noites,
-                "cafe_da_manha": True,
-                "cancelamento": "Gratuito até 24h antes",
-                "wifi": True,
-                "estacionamento": "Pago (R$80/dia)",
-                "destaque": "Melhor avaliado • Piscina • Academia"
-            },
-            {
-                "nome": "Ibis Styles" if "paulo" in destino.lower() else f"Hampton Inn {destino}",
-                "categoria": "3 estrelas",
-                "bairro": "Centro",
-                "avaliacao": 8.4,
-                "preco_noite": 320,
-                "preco_total": 320 * noites,
-                "cafe_da_manha": True,
-                "cancelamento": "Gratuito até 48h antes",
-                "wifi": True,
-                "estacionamento": "Gratuito",
-                "destaque": "Melhor custo-benefício"
-            },
-            {
-                "nome": "Rosewood São Paulo" if "paulo" in destino.lower() else f"Four Seasons {destino}",
-                "categoria": "5 estrelas (Luxo)",
-                "bairro": "Jardins",
-                "avaliacao": 9.6,
-                "preco_noite": 2100,
-                "preco_total": 2100 * noites,
-                "cafe_da_manha": True,
-                "cancelamento": "Gratuito até 72h antes",
-                "wifi": True,
-                "estacionamento": "Gratuito (valet)",
-                "destaque": "⭐ Melhor da cidade • Spa • Restaurante Michelin"
-            }
-        ],
-        "moeda": "BRL",
-        "nota": "⚠️ Preços simulados. Em produção: Booking Affiliate API ou Amadeus Hotels."
+    if not RAPIDAPI_KEY:
+        return json.dumps({"erro": "RAPIDAPI_KEY não configurada."})
+
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY.strip(),
+        "x-rapidapi-host": "apidojo-booking-v1.p.rapidapi.com"
     }
-    return json.dumps(results, ensure_ascii=False, indent=2)
+
+    try:
+        # Passo 1: buscar o dest_id da cidade
+        async with httpx.AsyncClient(timeout=15) as client:
+            loc_resp = await client.get(
+                "https://apidojo-booking-v1.p.rapidapi.com/locations/auto-complete",
+                headers=headers,
+                params={"text": destino, "languagecode": "pt-br"}
+            )
+            loc_data = loc_resp.json()
+
+        dest_id = None
+        dest_type = "city"
+        if loc_data and len(loc_data) > 0:
+            for item in loc_data:
+                if item.get("dest_type") in ["city", "region"]:
+                    dest_id = str(item.get("dest_id", ""))
+                    dest_type = item.get("dest_type", "city")
+                    break
+            if not dest_id:
+                dest_id = str(loc_data[0].get("dest_id", ""))
+                dest_type = loc_data[0].get("dest_type", "city")
+
+        if not dest_id:
+            return json.dumps({"erro": f"Destino '{destino}' não encontrado."})
+
+        # Passo 2: buscar hotéis
+        star_filter = ""
+        if categoria == "5_estrelas":
+            star_filter = "class%3A5"
+        elif categoria == "4_estrelas":
+            star_filter = "class%3A4%2Cclass%3A5"
+        elif categoria == "3_estrelas":
+            star_filter = "class%3A3"
+
+        search_params = {
+            "dest_id": dest_id,
+            "search_type": dest_type,
+            "arrival_date": checkin,
+            "departure_date": checkout,
+            "adults": str(adultos),
+            "room_qty": str(quartos),
+            "units": "metric",
+            "temperature_unit": "c",
+            "languagecode": "pt-br",
+            "currency_code": "BRL",
+            "order_by": "popularity"
+        }
+        if star_filter:
+            search_params["categories_filter"] = star_filter
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            search_resp = await client.get(
+                "https://apidojo-booking-v1.p.rapidapi.com/properties/list",
+                headers=headers,
+                params=search_params
+            )
+            search_data = search_resp.json()
+
+        hoteis = search_data.get("result", [])[:5]
+
+        if not hoteis:
+            return json.dumps({
+                "busca": f"{destino} | {checkin} → {checkout}",
+                "erro": "Nenhum hotel encontrado para este destino e datas.",
+                "sugestao": "Tente datas diferentes ou verifique o nome da cidade."
+            })
+
+        opcoes = []
+        for h in hoteis:
+            preco_raw = h.get("price_breakdown", {}).get("gross_price", 0)
+            try:
+                preco_total = float(preco_raw)
+                preco_noite = round(preco_total / noites, 2) if noites > 0 else preco_total
+            except Exception:
+                preco_total = 0
+                preco_noite = 0
+
+            avaliacao = h.get("review_score", 0)
+            avaliacao_texto = h.get("review_score_word", "")
+            stars = int(h.get("class", 0))
+            estrelas = "⭐" * stars if stars else ""
+
+            checkin_from = h.get("checkin", {}).get("from", "")
+            checkout_until = h.get("checkout", {}).get("until", "")
+
+            hotel_id = h.get("hotel_id", "")
+            link_reserva = (
+                f"https://www.booking.com/hotel/br/{h.get('url', '')}.pt-br.html"
+                f"?checkin={checkin}&checkout={checkout}&group_adults={adultos}&no_rooms={quartos}"
+                if h.get("url") else
+                f"https://www.booking.com/searchresults.pt-br.html?dest_id={dest_id}&checkin={checkin}&checkout={checkout}"
+            )
+
+            opcoes.append({
+                "nome": h.get("hotel_name", "Hotel"),
+                "estrelas": estrelas,
+                "bairro": h.get("district", h.get("city", destino)),
+                "avaliacao": avaliacao,
+                "avaliacao_texto": avaliacao_texto,
+                "preco_noite_brl": preco_noite,
+                "preco_total_brl": preco_total,
+                "moeda": "BRL",
+                "checkin_horario": checkin_from,
+                "checkout_horario": checkout_until,
+                "cancelamento": "Verificar no link de reserva",
+                "link_reserva": link_reserva,
+                "destaque": h.get("wishlist_count", "")
+            })
+
+        return json.dumps({
+            "busca": f"{destino} | {checkin} → {checkout} ({noites} noite{'s' if noites > 1 else ''})",
+            "adultos": adultos,
+            "quartos": quartos,
+            "opcoes": opcoes,
+            "nota": "✅ Preços reais via Booking.com. Toque no link para confirmar reserva com 1 clique.",
+            "instrucao": "Apresente as opções de forma clara com nome, preço por noite, avaliação e o link de reserva clicável."
+        }, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        logger.error(f"Erro RapidAPI hotéis: {e}")
+        return json.dumps({
+            "erro": f"Erro ao buscar hotéis: {str(e)}",
+            "sugestao": "Tente novamente em alguns instantes."
+        })
 
 
 async def tool_conferir_milhas(params: dict, profile: dict) -> str:
