@@ -338,6 +338,144 @@ TOOLS = [
 # ─────────────────────────────────────────────
 # EXECUTORES DAS FERRAMENTAS
 # ─────────────────────────────────────────────
+async def tool_salvar_viagem(params: dict, profile: dict) -> str:
+    tipo = params.get("tipo", "")
+    dados = params.get("dados", {})
+
+    if tipo == "voo":
+        voo_id = wallet_add_voo(dados)
+        companhia = dados.get("companhia", "")
+        link = gerar_link_checkin(companhia, dados.get("localizador", ""), dados.get("data", ""))
+        return json.dumps({
+            "sucesso": True,
+            "id": voo_id,
+            "mensagem": f"✅ Voo salvo na carteira! ID: {voo_id}",
+            "alertas_configurados": [
+                "48h antes — lembrete de check-in",
+                "24h antes — lembrete de viagem"
+            ],
+            "link_checkin": link or "Disponível 48h antes do voo"
+        }, ensure_ascii=False)
+
+    elif tipo == "hotel":
+        hotel_id = wallet_add_hotel(dados)
+        return json.dumps({
+            "sucesso": True,
+            "id": hotel_id,
+            "mensagem": f"✅ Hotel salvo na carteira! ID: {hotel_id}",
+            "alertas_configurados": ["24h antes do check-in — lembrete automático"]
+        }, ensure_ascii=False)
+
+    return json.dumps({"erro": "Tipo inválido. Use 'voo' ou 'hotel'."})
+
+
+async def tool_ver_carteira(params: dict, profile: dict) -> str:
+    dias = params.get("dias", 90)
+    proximos = wallet_get_proximos(dias)
+    wallet = load_wallet()
+
+    voos = proximos["voos"]
+    hoteis = proximos["hoteis"]
+
+    if not voos and not hoteis:
+        total_voos = len(wallet.get("voos", []))
+        total_hoteis = len(wallet.get("hoteis", []))
+        return json.dumps({
+            "mensagem": f"Nenhuma viagem nos próximos {dias} dias.",
+            "total_na_carteira": f"{total_voos} voos e {total_hoteis} hotéis registrados no total.",
+            "dica": "Para adicionar uma viagem, diga: 'Registrar voo LA3050 GRU→GIG dia 15/05'"
+        }, ensure_ascii=False)
+
+    resultado = {
+        "proximos_voos": [],
+        "proximas_reservas_hotel": [],
+        "total_viagens": len(voos) + len(hoteis)
+    }
+
+    for v in voos:
+        companhia = v.get("companhia", "")
+        localizador = v.get("localizador", "")
+        data = v.get("data", "")
+        link = gerar_link_checkin(companhia, localizador, data)
+        resultado["proximos_voos"].append({
+            "id": v.get("id"),
+            "companhia": companhia,
+            "voo": v.get("numero_voo", ""),
+            "rota": f"{v.get('origem', '')} → {v.get('destino', '')}",
+            "data": data,
+            "hora": v.get("hora_partida", ""),
+            "localizador": localizador,
+            "assento": v.get("assento", "A confirmar"),
+            "classe": v.get("classe", ""),
+            "dias_restantes": v.get("dias_restantes", 0),
+            "checkin_feito": v.get("checkin_feito", False),
+            "link_checkin": link or "Disponível 48h antes"
+        })
+
+    for h in hoteis:
+        resultado["proximas_reservas_hotel"].append({
+            "id": h.get("id"),
+            "hotel": h.get("nome", ""),
+            "endereco": h.get("endereco", ""),
+            "checkin": h.get("checkin", ""),
+            "checkout": h.get("checkout", ""),
+            "confirmacao": h.get("confirmacao", ""),
+            "horario_checkin": h.get("horario_checkin", "14h"),
+            "dias_restantes": h.get("dias_restantes", 0)
+        })
+
+    return json.dumps(resultado, ensure_ascii=False, indent=2)
+
+
+async def tool_atualizar_milhas_auto(params: dict, profile: dict) -> str:
+    programa = params.get("programa", "ambos")
+    resultados = {}
+
+    if programa in ["smiles", "ambos"]:
+        cpf_email = params.get("cpf_email_smiles", "")
+        senha = params.get("senha_smiles", "")
+        if not cpf_email or not senha:
+            resultados["smiles"] = {
+                "erro": "Para atualização automática, preciso do seu CPF/email e senha do Smiles. "
+                        "Diga: 'Meu login Smiles é [cpf/email] e minha senha é [senha]'"
+            }
+        else:
+            resultado_smiles = await scrape_smiles(cpf_email, senha)
+            if "saldo" in resultado_smiles:
+                # Atualiza perfil automaticamente
+                profile["fidelidades"]["smiles"]["saldo_estimado"] = resultado_smiles["saldo"]
+                if resultado_smiles.get("categoria"):
+                    profile["fidelidades"]["smiles"]["categoria"] = resultado_smiles["categoria"]
+                if resultado_smiles.get("vencimento"):
+                    profile["fidelidades"]["smiles"]["vencimento_proximo"] = resultado_smiles["vencimento"]
+                save_profile(profile)
+            resultados["smiles"] = resultado_smiles
+
+    if programa in ["latam_pass", "ambos"]:
+        email = params.get("email_latam", "")
+        senha = params.get("senha_latam", "")
+        if not email or not senha:
+            resultados["latam_pass"] = {
+                "erro": "Para atualização automática, preciso do seu email e senha do LATAM Pass. "
+                        "Diga: 'Meu login LATAM é [email] e minha senha é [senha]'"
+            }
+        else:
+            resultado_latam = await scrape_latam(email, senha)
+            if "saldo" in resultado_latam:
+                profile["fidelidades"]["latam_pass"]["saldo_estimado"] = resultado_latam["saldo"]
+                if resultado_latam.get("categoria"):
+                    profile["fidelidades"]["latam_pass"]["categoria"] = resultado_latam["categoria"]
+                save_profile(profile)
+            resultados["latam_pass"] = resultado_latam
+
+    resultados["nota"] = (
+        "⚠️ Senhas são usadas apenas nesta sessão e não ficam armazenadas. "
+        "Para máxima segurança, use uma senha específica para o app e não compartilhe sua senha principal."
+    )
+    return json.dumps(resultados, ensure_ascii=False, indent=2)
+
+
+
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1543,140 +1681,3 @@ async def scrape_latam(email: str, senha: str) -> dict:
 # ═══════════════════════════════════════════════════════════════
 # EXECUTORES DAS NOVAS FERRAMENTAS
 # ═══════════════════════════════════════════════════════════════
-
-async def tool_salvar_viagem(params: dict, profile: dict) -> str:
-    tipo = params.get("tipo", "")
-    dados = params.get("dados", {})
-
-    if tipo == "voo":
-        voo_id = wallet_add_voo(dados)
-        companhia = dados.get("companhia", "")
-        link = gerar_link_checkin(companhia, dados.get("localizador", ""), dados.get("data", ""))
-        return json.dumps({
-            "sucesso": True,
-            "id": voo_id,
-            "mensagem": f"✅ Voo salvo na carteira! ID: {voo_id}",
-            "alertas_configurados": [
-                "48h antes — lembrete de check-in",
-                "24h antes — lembrete de viagem"
-            ],
-            "link_checkin": link or "Disponível 48h antes do voo"
-        }, ensure_ascii=False)
-
-    elif tipo == "hotel":
-        hotel_id = wallet_add_hotel(dados)
-        return json.dumps({
-            "sucesso": True,
-            "id": hotel_id,
-            "mensagem": f"✅ Hotel salvo na carteira! ID: {hotel_id}",
-            "alertas_configurados": ["24h antes do check-in — lembrete automático"]
-        }, ensure_ascii=False)
-
-    return json.dumps({"erro": "Tipo inválido. Use 'voo' ou 'hotel'."})
-
-
-async def tool_ver_carteira(params: dict, profile: dict) -> str:
-    dias = params.get("dias", 90)
-    proximos = wallet_get_proximos(dias)
-    wallet = load_wallet()
-
-    voos = proximos["voos"]
-    hoteis = proximos["hoteis"]
-
-    if not voos and not hoteis:
-        total_voos = len(wallet.get("voos", []))
-        total_hoteis = len(wallet.get("hoteis", []))
-        return json.dumps({
-            "mensagem": f"Nenhuma viagem nos próximos {dias} dias.",
-            "total_na_carteira": f"{total_voos} voos e {total_hoteis} hotéis registrados no total.",
-            "dica": "Para adicionar uma viagem, diga: 'Registrar voo LA3050 GRU→GIG dia 15/05'"
-        }, ensure_ascii=False)
-
-    resultado = {
-        "proximos_voos": [],
-        "proximas_reservas_hotel": [],
-        "total_viagens": len(voos) + len(hoteis)
-    }
-
-    for v in voos:
-        companhia = v.get("companhia", "")
-        localizador = v.get("localizador", "")
-        data = v.get("data", "")
-        link = gerar_link_checkin(companhia, localizador, data)
-        resultado["proximos_voos"].append({
-            "id": v.get("id"),
-            "companhia": companhia,
-            "voo": v.get("numero_voo", ""),
-            "rota": f"{v.get('origem', '')} → {v.get('destino', '')}",
-            "data": data,
-            "hora": v.get("hora_partida", ""),
-            "localizador": localizador,
-            "assento": v.get("assento", "A confirmar"),
-            "classe": v.get("classe", ""),
-            "dias_restantes": v.get("dias_restantes", 0),
-            "checkin_feito": v.get("checkin_feito", False),
-            "link_checkin": link or "Disponível 48h antes"
-        })
-
-    for h in hoteis:
-        resultado["proximas_reservas_hotel"].append({
-            "id": h.get("id"),
-            "hotel": h.get("nome", ""),
-            "endereco": h.get("endereco", ""),
-            "checkin": h.get("checkin", ""),
-            "checkout": h.get("checkout", ""),
-            "confirmacao": h.get("confirmacao", ""),
-            "horario_checkin": h.get("horario_checkin", "14h"),
-            "dias_restantes": h.get("dias_restantes", 0)
-        })
-
-    return json.dumps(resultado, ensure_ascii=False, indent=2)
-
-
-async def tool_atualizar_milhas_auto(params: dict, profile: dict) -> str:
-    programa = params.get("programa", "ambos")
-    resultados = {}
-
-    if programa in ["smiles", "ambos"]:
-        cpf_email = params.get("cpf_email_smiles", "")
-        senha = params.get("senha_smiles", "")
-        if not cpf_email or not senha:
-            resultados["smiles"] = {
-                "erro": "Para atualização automática, preciso do seu CPF/email e senha do Smiles. "
-                        "Diga: 'Meu login Smiles é [cpf/email] e minha senha é [senha]'"
-            }
-        else:
-            resultado_smiles = await scrape_smiles(cpf_email, senha)
-            if "saldo" in resultado_smiles:
-                # Atualiza perfil automaticamente
-                profile["fidelidades"]["smiles"]["saldo_estimado"] = resultado_smiles["saldo"]
-                if resultado_smiles.get("categoria"):
-                    profile["fidelidades"]["smiles"]["categoria"] = resultado_smiles["categoria"]
-                if resultado_smiles.get("vencimento"):
-                    profile["fidelidades"]["smiles"]["vencimento_proximo"] = resultado_smiles["vencimento"]
-                save_profile(profile)
-            resultados["smiles"] = resultado_smiles
-
-    if programa in ["latam_pass", "ambos"]:
-        email = params.get("email_latam", "")
-        senha = params.get("senha_latam", "")
-        if not email or not senha:
-            resultados["latam_pass"] = {
-                "erro": "Para atualização automática, preciso do seu email e senha do LATAM Pass. "
-                        "Diga: 'Meu login LATAM é [email] e minha senha é [senha]'"
-            }
-        else:
-            resultado_latam = await scrape_latam(email, senha)
-            if "saldo" in resultado_latam:
-                profile["fidelidades"]["latam_pass"]["saldo_estimado"] = resultado_latam["saldo"]
-                if resultado_latam.get("categoria"):
-                    profile["fidelidades"]["latam_pass"]["categoria"] = resultado_latam["categoria"]
-                save_profile(profile)
-            resultados["latam_pass"] = resultado_latam
-
-    resultados["nota"] = (
-        "⚠️ Senhas são usadas apenas nesta sessão e não ficam armazenadas. "
-        "Para máxima segurança, use uma senha específica para o app e não compartilhe sua senha principal."
-    )
-    return json.dumps(resultados, ensure_ascii=False, indent=2)
-
