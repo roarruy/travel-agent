@@ -1184,7 +1184,11 @@ async def cmd_carteira(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     """Inicia o scheduler de alertas após o bot subir."""
-    asyncio.create_task(scheduler_loop(app))
+    # scheduler_loop é definido abaixo — chamado via string para evitar erro de ordem
+    async def _start_scheduler():
+        await asyncio.sleep(2)
+        await scheduler_loop(app)
+    asyncio.create_task(_start_scheduler())
     logger.info("Scheduler de alertas iniciado.")
 
 
