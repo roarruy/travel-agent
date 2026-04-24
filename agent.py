@@ -503,15 +503,7 @@ async def tool_buscar_hoteis(params: dict, profile: dict) -> str:
         if not dest_id:
             return json.dumps({"erro": f"Destino '{destino}' não encontrado."})
 
-        # Passo 2: buscar hotéis
-        star_filter = ""
-        if categoria == "5_estrelas":
-            star_filter = "class%3A5"
-        elif categoria == "4_estrelas":
-            star_filter = "class%3A4%2Cclass%3A5"
-        elif categoria == "3_estrelas":
-            star_filter = "class%3A3"
-
+        # Passo 2: buscar hotéis sem filtro de categoria para maximizar resultados
         search_params = {
             "dest_id": dest_id,
             "search_type": dest_type,
@@ -523,12 +515,11 @@ async def tool_buscar_hoteis(params: dict, profile: dict) -> str:
             "temperature_unit": "c",
             "languagecode": "pt-br",
             "currency_code": "BRL",
-            "order_by": "popularity"
+            "order_by": "popularity",
+            "offset": "0"
         }
-        if star_filter:
-            search_params["categories_filter"] = star_filter
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             search_resp = await client.get(
                 "https://apidojo-booking-v1.p.rapidapi.com/properties/list",
                 headers=headers,
@@ -536,14 +527,29 @@ async def tool_buscar_hoteis(params: dict, profile: dict) -> str:
             )
             search_data = search_resp.json()
 
-        hoteis = search_data.get("result", [])[:5]
+        # Tenta diferentes chaves de resultado
+        hoteis = (
+            search_data.get("result") or
+            search_data.get("data", {}).get("result") or
+            search_data.get("hotels") or
+            []
+        )
+        hoteis = list(hoteis)[:5] if hoteis else []
 
         if not hoteis:
+            link_busca = (
+                f"https://www.booking.com/searchresults.pt-br.html"
+                f"?dest_id={dest_id}&dest_type={dest_type}"
+                f"&checkin={checkin}&checkout={checkout}"
+                f"&group_adults={adultos}&no_rooms={quartos}"
+                f"&order=popularity"
+            )
             return json.dumps({
                 "busca": f"{destino} | {checkin} → {checkout}",
-                "erro": "Nenhum hotel encontrado para este destino e datas.",
-                "sugestao": "Tente datas diferentes ou verifique o nome da cidade."
-            })
+                "resultado": "Sem disponibilidade via API para estas datas.",
+                "link_busca_direta": link_busca,
+                "instrucao": f"Informe ao usuário que encontrou o link direto no Booking.com e forneça este link clicável: {link_busca}"
+            }, ensure_ascii=False)
 
         opcoes = []
         for h in hoteis:
