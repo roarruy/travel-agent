@@ -91,8 +91,6 @@ DEFAULT_PROFILE = {
 }
 
 
-
-# ── PROFILE & HISTORY ───────────────────────────────────────
 def load_profile() -> dict:
     if os.path.exists(PROFILE_PATH):
         with open(PROFILE_PATH) as f:
@@ -122,8 +120,15 @@ def save_history(history: list):
         json.dump(history[-50:], f, ensure_ascii=False, indent=2)
 
 
+# ─────────────────────────────────────────────
+# FERRAMENTAS DO AGENTE
+# ─────────────────────────────────────────────
 
-# ── WALLET ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO: CARTEIRA DE VIAGENS
+# ═══════════════════════════════════════════════════════════════
+
+WALLET_PATH = "data/wallet.json"
 
 def load_wallet() -> dict:
     if os.path.exists(WALLET_PATH):
@@ -189,30 +194,6 @@ def wallet_get_proximos(dias: int = 30) -> dict:
 # ═══════════════════════════════════════════════════════════════
 # MÓDULO: ALERTAS AUTOMÁTICOS
 # ═══════════════════════════════════════════════════════════════
-
-
-# ── ALERTS ──────────────────────────────────────────────────
-
-def gerar_link_checkin(companhia: str, localizador: str, data: str) -> str:
-    """Gera link de check-in para cada companhia."""
-    companhia = companhia.upper()
-    if not localizador:
-        return ""
-    
-    if "LATAM" in companhia or "LA" in companhia:
-        return f"https://www.latamairlines.com/br/pt/check-in?record={localizador}"
-    elif "GOL" in companhia or "G3" in companhia:
-        return f"https://checkin.voegol.com.br/?locator={localizador}"
-    elif "AZUL" in companhia or "AD" in companhia:
-        return f"https://checkin.voeazul.com.br/?locator={localizador}"
-    elif "TAP" in companhia:
-        return f"https://checkin.flytap.com/?locator={localizador}"
-    elif "AMERICAN" in companhia or "AA" in companhia:
-        return f"https://www.aa.com/checkin/main?recordLocator={localizador}"
-    else:
-        return ""
-
-
 
 async def check_and_send_alerts(app):
     """Verifica e envia alertas para viagens próximas."""
@@ -312,6 +293,26 @@ async def check_and_send_alerts(app):
             logger.error(f"Erro ao processar alerta de hotel: {e}")
 
 
+def gerar_link_checkin(companhia: str, localizador: str, data: str) -> str:
+    """Gera link de check-in para cada companhia."""
+    companhia = companhia.upper()
+    if not localizador:
+        return ""
+    
+    if "LATAM" in companhia or "LA" in companhia:
+        return f"https://www.latamairlines.com/br/pt/check-in?record={localizador}"
+    elif "GOL" in companhia or "G3" in companhia:
+        return f"https://checkin.voegol.com.br/?locator={localizador}"
+    elif "AZUL" in companhia or "AD" in companhia:
+        return f"https://checkin.voeazul.com.br/?locator={localizador}"
+    elif "TAP" in companhia:
+        return f"https://checkin.flytap.com/?locator={localizador}"
+    elif "AMERICAN" in companhia or "AA" in companhia:
+        return f"https://www.aa.com/checkin/main?recordLocator={localizador}"
+    else:
+        return ""
+
+
 async def scheduler_loop(app):
     """Loop que roda a cada 30 minutos verificando alertas."""
     while True:
@@ -325,9 +326,6 @@ async def scheduler_loop(app):
 # ═══════════════════════════════════════════════════════════════
 # MÓDULO: SCRAPING DE MILHAS (Smiles e LATAM Pass)
 # ═══════════════════════════════════════════════════════════════
-
-
-# ── SCRAPING ─────────────────────────────────────────────────
 
 async def scrape_smiles(cpf_ou_email: str, senha: str) -> dict:
     """
@@ -447,12 +445,227 @@ async def scrape_latam(email: str, senha: str) -> dict:
 
 
 
+
 # ═══════════════════════════════════════════════════════════════
 # EXECUTORES DAS NOVAS FERRAMENTAS
 # ═══════════════════════════════════════════════════════════════
 
 
-# ── NEW TOOLS ────────────────────────────────────────────────
+TOOLS = [
+    {
+        "name": "buscar_voos",
+        "description": (
+            "Busca e compara voos entre duas cidades. Retorna opções com preço, "
+            "duração, escalas e disponibilidade em milhas. Use sempre que o usuário "
+            "perguntar sobre passagens aéreas, cotação de voos ou comparação de preços."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string", "description": "Código IATA ou nome da cidade de origem. Ex: GRU, São Paulo"},
+                "destino": {"type": "string", "description": "Código IATA ou nome da cidade de destino. Ex: LIS, Lisboa"},
+                "data_ida": {"type": "string", "description": "Data de ida no formato YYYY-MM-DD"},
+                "data_volta": {"type": "string", "description": "Data de volta no formato YYYY-MM-DD (opcional para só ida)"},
+                "adultos": {"type": "integer", "description": "Número de passageiros adultos", "default": 1},
+                "classe": {"type": "string", "enum": ["economica", "premium_economy", "executiva", "primeira"], "description": "Classe de viagem"},
+                "apenas_diretos": {"type": "boolean", "description": "Se true, filtra apenas voos sem escala", "default": False}
+            },
+            "required": ["origem", "destino", "data_ida"]
+        }
+    },
+    {
+        "name": "buscar_voos_em_milhas",
+        "description": (
+            "Busca disponibilidade e custo de voos usando milhas/pontos nos programas "
+            "Smiles, LATAM Pass, TudoAzul e Livelo. Ideal para planejar viagens em classe executiva. "
+            "Use quando o usuário perguntar sobre usar milhas, pontos ou 'vale a pena usar milhas'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origem": {"type": "string", "description": "Cidade ou código IATA de origem"},
+                "destino": {"type": "string", "description": "Cidade ou código IATA de destino"},
+                "data_ida": {"type": "string", "description": "Data no formato YYYY-MM-DD"},
+                "data_volta": {"type": "string", "description": "Data de volta (opcional)"},
+                "classe": {"type": "string", "enum": ["economica", "executiva", "primeira"], "default": "executiva"},
+                "programas": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["smiles", "latam_pass", "tudoazul", "livelo"]},
+                    "description": "Programas para verificar. Se vazio, verifica todos."
+                }
+            },
+            "required": ["origem", "destino", "data_ida"]
+        }
+    },
+    {
+        "name": "buscar_hoteis",
+        "description": (
+            "Busca e compara hotéis em uma cidade. Retorna opções com preço, "
+            "localização, avaliação e benefícios. Use quando o usuário perguntar sobre "
+            "hospedagem, hotel, pousada ou 'onde ficar'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "destino": {"type": "string", "description": "Cidade de destino"},
+                "checkin": {"type": "string", "description": "Data de check-in YYYY-MM-DD"},
+                "checkout": {"type": "string", "description": "Data de check-out YYYY-MM-DD"},
+                "adultos": {"type": "integer", "default": 1},
+                "quartos": {"type": "integer", "default": 1},
+                "categoria": {"type": "string", "enum": ["qualquer", "3_estrelas", "4_estrelas", "5_estrelas", "boutique"], "default": "4_estrelas"},
+                "cafe_da_manha": {"type": "boolean", "description": "Filtrar apenas com café da manhã", "default": False},
+                "cancelamento_gratis": {"type": "boolean", "description": "Filtrar apenas com cancelamento gratuito", "default": True}
+            },
+            "required": ["destino", "checkin", "checkout"]
+        }
+    },
+    {
+        "name": "conferir_milhas",
+        "description": (
+            "Consulta saldo de milhas, pontos acumulados, vencimentos próximos e "
+            "oportunidades de transferência entre programas. Use quando o usuário perguntar "
+            "sobre saldo, quantas milhas tem, vencimento de pontos ou status nos programas."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "programa": {
+                    "type": "string",
+                    "enum": ["smiles", "latam_pass", "livelo", "tudoazul", "todos"],
+                    "description": "Programa específico ou 'todos' para resumo geral"
+                },
+                "incluir_transferencias": {
+                    "type": "boolean",
+                    "description": "Se true, mostra opções de transferência entre programas",
+                    "default": True
+                }
+            },
+            "required": ["programa"]
+        }
+    },
+    {
+        "name": "calcular_valor_milhas",
+        "description": (
+            "Calcula se vale mais a pena pagar em dinheiro ou usar milhas para uma viagem. "
+            "Compara CPM (custo por milha) e retorna recomendação. Use quando o usuário perguntar "
+            "'vale a pena usar milhas?' ou quiser comparar opções."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "preco_passagem_dinheiro": {"type": "number", "description": "Preço da passagem em reais (R$)"},
+                "milhas_necessarias": {"type": "number", "description": "Quantidade de milhas exigidas para o resgate"},
+                "taxas_milhas": {"type": "number", "description": "Taxas a pagar mesmo usando milhas (R$)", "default": 0},
+                "programa": {"type": "string", "description": "Programa de fidelidade da cotação em milhas"}
+            },
+            "required": ["preco_passagem_dinheiro", "milhas_necessarias"]
+        }
+    },
+    {
+        "name": "montar_itinerario",
+        "description": (
+            "Cria um itinerário completo de viagem com voo, hotel, transfers e dicas. "
+            "Use quando o usuário quiser planejar uma viagem completa ou pedir um roteiro."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "destino": {"type": "string"},
+                "data_ida": {"type": "string"},
+                "data_volta": {"type": "string"},
+                "objetivo": {"type": "string", "description": "Lazer, negócios, lua de mel, etc."},
+                "orcamento_total": {"type": "number", "description": "Orçamento total em reais (opcional)"},
+                "usar_milhas": {"type": "boolean", "default": True}
+            },
+            "required": ["destino", "data_ida", "data_volta"]
+        }
+    },
+    {
+        "name": "atualizar_perfil",
+        "description": (
+            "Atualiza informações do perfil do viajante: saldo de milhas, preferências, "
+            "dados do passaporte, números dos programas de fidelidade. Use quando o usuário "
+            "informar dados pessoais, saldo ou quiser atualizar preferências."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "campo": {"type": "string", "description": "Campo a atualizar. Ex: 'smiles.saldo_estimado', 'preferencias.assento'"},
+                "valor": {"description": "Novo valor para o campo"}
+            },
+            "required": ["campo", "valor"]
+        }
+    },
+    {
+        "name": "alertas_e_monitoramento",
+        "description": (
+            "Configura alertas de preço para voos ou hotéis, monitora disponibilidade "
+            "de assentos prêmio em milhas e alerta sobre vencimento de milhas."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "enum": ["queda_preco_voo", "disponibilidade_milhas", "vencimento_milhas", "promocao_companhia"]},
+                "parametros": {"type": "object", "description": "Parâmetros específicos do alerta"}
+            },
+            "required": ["tipo"]
+        }
+    },
+    {
+        "name": "salvar_viagem",
+        "description": (
+            "Salva uma passagem aérea ou reserva de hotel emitida na carteira de viagens. "
+            "Use quando o usuário informar que comprou uma passagem, confirmou uma reserva, "
+            "ou quiser registrar uma viagem. Guarda todos os detalhes e ativa alertas automáticos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "enum": ["voo", "hotel"], "description": "Tipo de item a salvar"},
+                "dados": {"type": "object", "description": "Para voo: companhia, localizador, origem, destino, data (YYYY-MM-DD), hora_partida (HH:MM), assento, classe. Para hotel: nome, checkin (YYYY-MM-DD), checkout (YYYY-MM-DD), confirmacao, endereco, horario_checkin"}
+            },
+            "required": ["tipo", "dados"]
+        }
+    },
+    {
+        "name": "ver_carteira",
+        "description": (
+            "Mostra todas as viagens salvas: passagens e reservas de hotel. "
+            "Use quando o usuário perguntar sobre viagens marcadas, próximas viagens, "
+            "'o que tenho marcado', 'minhas passagens', 'meus hotéis reservados'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dias": {"type": "integer", "description": "Quantos dias à frente mostrar (padrão 90)", "default": 90}
+            }
+        }
+    },
+    {
+        "name": "atualizar_milhas_automatico",
+        "description": (
+            "Acessa Smiles e/ou LATAM Pass automaticamente para buscar saldo atualizado de milhas. "
+            "Use quando o usuário pedir para atualizar milhas automaticamente ou verificar saldo real. "
+            "Requer que o usuário tenha fornecido login e senha dos programas."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "programa": {"type": "string", "enum": ["smiles", "latam_pass", "ambos"]},
+                "cpf_email_smiles": {"type": "string", "description": "CPF ou email do Smiles"},
+                "senha_smiles": {"type": "string", "description": "Senha do Smiles"},
+                "email_latam": {"type": "string", "description": "Email do LATAM Pass"},
+                "senha_latam": {"type": "string", "description": "Senha do LATAM Pass"}
+            },
+            "required": ["programa"]
+        }
+    }
+]
+
+
+# ─────────────────────────────────────────────
+# EXECUTORES DAS FERRAMENTAS
+# ─────────────────────────────────────────────
 async def tool_salvar_viagem(params: dict, profile: dict) -> str:
     tipo = params.get("tipo", "")
     dados = params.get("dados", {})
@@ -591,8 +804,6 @@ async def tool_atualizar_milhas_auto(params: dict, profile: dict) -> str:
 
 
 
-
-# ── TOOLS + EXECUTE ──────────────────────────────────────────
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1143,8 +1354,6 @@ async def tool_alertas(params: dict, profile: dict) -> str:
 # ─────────────────────────────────────────────
 # SYSTEM PROMPT
 # ─────────────────────────────────────────────
-
-# ── SYSTEM PROMPT + AGENT ────────────────────────────────────
 def build_system_prompt(profile: dict) -> str:
     fid = profile.get("fidelidades", {})
     pref = profile.get("preferencias", {})
@@ -1259,8 +1468,6 @@ async def run_agent(user_message: str, profile: dict, history: list) -> str:
 # ─────────────────────────────────────────────
 # HANDLERS DO TELEGRAM
 # ─────────────────────────────────────────────
-
-# ── TELEGRAM HANDLERS ────────────────────────────────────────
 def is_authorized(update: Update) -> bool:
     user_id = update.effective_user.id
     if AUTHORIZED_USERS == [0]:
@@ -1476,11 +1683,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# ═══════════════════════════════════════════════════════════════
-# MÓDULO: CARTEIRA DE VIAGENS
-# ═══════════════════════════════════════════════════════════════
-
-WALLET_PATH = "data/wallet.json"
 
