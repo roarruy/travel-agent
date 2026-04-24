@@ -832,8 +832,14 @@ def build_system_prompt(profile: dict) -> str:
     pref = profile.get("preferencias", {})
     cartoes = profile.get("cartoes", [])
     cartoes_str = ", ".join(f"{c['nome']} ({c['programa']}, {c['pontos_por_real']} pts/R$)" for c in cartoes)
+    hoje = datetime.now().strftime("%d/%m/%Y")
+    ano_atual = datetime.now().year
 
     return f"""Você é o agente de viagens pessoal de {profile.get('nome', 'Rodrigo')}, especializado em maximizar benefícios de fidelidade e encontrar as melhores opções de viagem.
+
+## Data atual
+- **Hoje é:** {hoje} (ano {ano_atual})
+- **IMPORTANTE:** Sempre use o ano {ano_atual} como referência. Quando o usuário disser "em julho", "em agosto" etc sem especificar o ano, assuma {ano_atual}. Nunca use datas passadas nas buscas.
 
 ## Perfil do viajante
 - **Nome:** {profile.get('nome')}
