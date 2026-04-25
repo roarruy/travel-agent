@@ -237,13 +237,17 @@ async def scan_gmail_for_travel(max_results=20):
     if not GMAIL_REFRESH_TOKEN:
         return [{"erro": "Gmail nao configurado."}]
     try:
+        import warnings
+        warnings.filterwarnings("ignore")
         service = get_gmail_service()
+        logger.info("Gmail service criado com sucesso")
         query = ("from:(latamairlines.com OR voegol.com OR voeazul.com OR tap.pt OR "
                  "american.com OR booking.com OR hotels.com OR expedia.com OR "
                  "smiles.com.br OR tudoazul.com OR livelo.com.br OR airbnb.com) "
                  "newer_than:90d")
         results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
         messages = results.get("messages", [])
+        logger.info(f"Gmail: {len(messages)} emails encontrados")
         emails = []
         for msg_ref in messages[:10]:
             msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
@@ -257,8 +261,8 @@ async def scan_gmail_for_travel(max_results=20):
             })
         return emails
     except Exception as e:
-        logger.error(f"Erro Gmail scan: {e}")
-        return [{"erro": str(e)}]
+        logger.error(f"Erro Gmail scan DETALHADO: {type(e).__name__}: {e}")
+        return [{"erro": f"{type(e).__name__}: {str(e)}"}]
 
 async def check_gmail_for_changes(app):
     if not AUTHORIZED_USERS or AUTHORIZED_USERS == [0] or not GMAIL_REFRESH_TOKEN:
