@@ -699,55 +699,6 @@ TOOLS = [
             },
             "required": ["tipo"]
         }
-    },
-    {
-        "name": "salvar_viagem",
-        "description": (
-            "Salva uma passagem aérea ou reserva de hotel emitida na carteira de viagens. "
-            "Use quando o usuário informar que comprou uma passagem, confirmou uma reserva, "
-            "ou quiser registrar uma viagem. Guarda todos os detalhes e ativa alertas automáticos."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tipo": {"type": "string", "enum": ["voo", "hotel"], "description": "Tipo de item a salvar"},
-                "dados": {"type": "object", "description": "Para voo: companhia, localizador, origem, destino, data (YYYY-MM-DD), hora_partida (HH:MM), assento, classe. Para hotel: nome, checkin (YYYY-MM-DD), checkout (YYYY-MM-DD), confirmacao, endereco, horario_checkin"}
-            },
-            "required": ["tipo", "dados"]
-        }
-    },
-    {
-        "name": "ver_carteira",
-        "description": (
-            "Mostra todas as viagens salvas: passagens e reservas de hotel. "
-            "Use quando o usuário perguntar sobre viagens marcadas, próximas viagens, "
-            "'o que tenho marcado', 'minhas passagens', 'meus hotéis reservados'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "dias": {"type": "integer", "description": "Quantos dias à frente mostrar (padrão 90)", "default": 90}
-            }
-        }
-    },
-    {
-        "name": "atualizar_milhas_automatico",
-        "description": (
-            "Acessa Smiles e/ou LATAM Pass automaticamente para buscar saldo atualizado de milhas. "
-            "Use quando o usuário pedir para atualizar milhas automaticamente ou verificar saldo real. "
-            "Requer que o usuário tenha fornecido login e senha dos programas."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "programa": {"type": "string", "enum": ["smiles", "latam_pass", "ambos"]},
-                "cpf_email_smiles": {"type": "string", "description": "CPF ou email do Smiles"},
-                "senha_smiles": {"type": "string", "description": "Senha do Smiles"},
-                "email_latam": {"type": "string", "description": "Email do LATAM Pass"},
-                "senha_latam": {"type": "string", "description": "Senha do LATAM Pass"}
-            },
-            "required": ["programa"]
-        }
     }
 ]
 
