@@ -458,10 +458,16 @@ async def tool_verificar_gmail(params, profile):
     acao = params.get("acao", "buscar_emails_viagem")
     max_emails = params.get("max_emails", 10)
     if not GMAIL_REFRESH_TOKEN:
-        return json.dumps({"erro": "Gmail nao configurado."})
+        return json.dumps({"erro": "GMAIL_REFRESH_TOKEN nao encontrado nas variaveis de ambiente."})
     emails = await scan_gmail_for_travel(max_emails)
+    # Check if returned an error
+    if emails and isinstance(emails[0], dict) and "erro" in emails[0]:
+        return json.dumps({"erro_gmail": emails[0]["erro"],
+            "debug": f"GMAIL_REFRESH_TOKEN presente: {bool(GMAIL_REFRESH_TOKEN)}, CLIENT_ID presente: {bool(GMAIL_CLIENT_ID)}"
+        })
     if not emails:
-        return json.dumps({"resultado": "Nenhum email de viagem encontrado nos ultimos 90 dias."})
+        return json.dumps({"resultado": "Nenhum email de viagem encontrado nos ultimos 90 dias.",
+            "debug": "Busca executada com sucesso mas sem resultados."})
     if acao == "buscar_emails_viagem":
         return json.dumps({"total": len(emails), "emails": emails,
             "instrucao": "Apresente os emails encontrados. Pergunte se quer importar para a carteira."
