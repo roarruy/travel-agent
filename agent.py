@@ -31,6 +31,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "SUA_CHAVE_AQUI")
 AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID", "")
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET", "")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # IDs do Telegram autorizados (só você e quem quiser autorizar)
 AUTHORIZED_USERS = [int(x) for x in os.getenv("AUTHORIZED_USERS", "0").split(",")]
@@ -1639,6 +1640,80 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcreve mensagem de voz via Whisper e processa como texto."""
+    if not is_authorized(update):
+        return
+
+    if not OPENAI_API_KEY:
+        await update.message.reply_text("⚠️ OPENAI_API_KEY não configurada para transcrição de voz.")
+        return
+
+    thinking = await update.message.reply_text("🎙️ Transcrevendo áudio...")
+
+    try:
+        # Download voice file from Telegram
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        
+        await file.download_to_drive(tmp_path)
+
+        # Transcribe with Whisper
+        async with httpx.AsyncClient(timeout=30) as client:
+            with open(tmp_path, "rb") as audio_file:
+                resp = await client.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    data={"model": "whisper-1", "language": "pt"},
+                    files={"file": ("audio.ogg", audio_file, "audio/ogg")}
+                )
+
+        os.unlink(tmp_path)
+
+        if resp.status_code != 200:
+            await thinking.delete()
+            await update.message.reply_text(f"⚠️ Erro na transcrição: {resp.status_code}")
+            return
+
+        text = resp.json().get("text", "").strip()
+        if not text:
+            await thinking.delete()
+            await update.message.reply_text("⚠️ Não consegui entender o áudio. Tente novamente.")
+            return
+
+        await thinking.edit_text(f"🎙️ *Você disse:* _{text}_\n\n⏳ Processando...", parse_mode="Markdown")
+
+        # Process transcribed text as normal message
+        profile = load_profile()
+        history = load_history()
+        response = await run_agent(text, profile, history)
+
+        history.append({"role": "user", "content": text})
+        history.append({"role": "assistant", "content": response})
+        save_history(history)
+
+        await thinking.delete()
+
+        if len(response) > 4000:
+            partes = [response[i:i+4000] for i in range(0, len(response), 4000)]
+            for parte in partes:
+                await update.message.reply_text(parte, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(response, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Erro no handler de voz: {e}")
+        try:
+            await thinking.delete()
+        except:
+            pass
+        await update.message.reply_text(f"⚠️ Erro ao processar áudio: {str(e)}")
+
+
 async def cmd_carteira(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
@@ -1676,6 +1751,7 @@ def main():
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     logger.info("Bot rodando. Pressione Ctrl+C para parar.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
