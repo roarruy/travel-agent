@@ -32,6 +32,13 @@ AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID", "")
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET", "")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")
+GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")
+GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")
+GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")
+GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")
 
 # IDs do Telegram autorizados (só você e quem quiser autorizar)
 AUTHORIZED_USERS = [int(x) for x in os.getenv("AUTHORIZED_USERS", "0").split(",")]
@@ -124,25 +131,21 @@ def save_history(history: list):
 # ─────────────────────────────────────────────
 # FERRAMENTAS DO AGENTE
 # ─────────────────────────────────────────────
-
-# ═══════════════════════════════════════════════════════════════
-# MÓDULO: CARTEIRA DE VIAGENS
-# ═══════════════════════════════════════════════════════════════
-
+# ── WALLET ─────────────────────────────────────────────────────
 WALLET_PATH = "data/wallet.json"
 
-def load_wallet() -> dict:
+def load_wallet():
     if os.path.exists(WALLET_PATH):
         with open(WALLET_PATH) as f:
             return json.load(f)
-    return {"voos": [], "hoteis": []}
+    return {"voos": [], "hoteis": [], "alertas_gmail": []}
 
-def save_wallet(wallet: dict):
+def save_wallet(wallet):
     os.makedirs("data", exist_ok=True)
     with open(WALLET_PATH, "w") as f:
         json.dump(wallet, f, ensure_ascii=False, indent=2)
 
-def wallet_add_voo(dados: dict) -> str:
+def wallet_add_voo(dados):
     wallet = load_wallet()
     voo_id = f"VOO-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     dados["id"] = voo_id
@@ -152,7 +155,7 @@ def wallet_add_voo(dados: dict) -> str:
     save_wallet(wallet)
     return voo_id
 
-def wallet_add_hotel(dados: dict) -> str:
+def wallet_add_hotel(dados):
     wallet = load_wallet()
     hotel_id = f"HTL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     dados["id"] = hotel_id
@@ -161,295 +164,331 @@ def wallet_add_hotel(dados: dict) -> str:
     save_wallet(wallet)
     return hotel_id
 
-def wallet_get_proximos(dias: int = 30) -> dict:
+def wallet_get_proximos(dias=90):
     wallet = load_wallet()
     hoje = datetime.now().date()
     limite = hoje + timedelta(days=dias)
-    
-    voos_proximos = []
+    voos = []
     for v in wallet["voos"]:
         try:
-            data_voo = datetime.strptime(v.get("data", ""), "%Y-%m-%d").date()
-            if hoje <= data_voo <= limite:
-                v["dias_restantes"] = (data_voo - hoje).days
-                voos_proximos.append(v)
+            d = datetime.strptime(v.get("data",""), "%Y-%m-%d").date()
+            if hoje <= d <= limite:
+                v["dias_restantes"] = (d - hoje).days
+                voos.append(v)
         except:
             pass
-    
-    hoteis_proximos = []
+    hoteis = []
     for h in wallet["hoteis"]:
         try:
-            data_checkin = datetime.strptime(h.get("checkin", ""), "%Y-%m-%d").date()
-            if hoje <= data_checkin <= limite:
-                h["dias_restantes"] = (data_checkin - hoje).days
-                hoteis_proximos.append(h)
+            d = datetime.strptime(h.get("checkin",""), "%Y-%m-%d").date()
+            if hoje <= d <= limite:
+                h["dias_restantes"] = (d - hoje).days
+                hoteis.append(h)
         except:
             pass
-    
-    voos_proximos.sort(key=lambda x: x.get("data", ""))
-    hoteis_proximos.sort(key=lambda x: x.get("checkin", ""))
-    
-    return {"voos": voos_proximos, "hoteis": hoteis_proximos}
+    voos.sort(key=lambda x: x.get("data",""))
+    hoteis.sort(key=lambda x: x.get("checkin",""))
+    return {"voos": voos, "hoteis": hoteis}
 
+def gerar_link_checkin(companhia, localizador, data):
+    c = companhia.upper()
+    if not localizador:
+        return ""
+    if "LATAM" in c or "LA" in c:
+        return f"https://www.latamairlines.com/br/pt/check-in?record={localizador}"
+    elif "GOL" in c or "G3" in c:
+        return f"https://checkin.voegol.com.br/?locator={localizador}"
+    elif "AZUL" in c or "AD" in c:
+        return f"https://checkin.voeazul.com.br/?locator={localizador}"
+    elif "TAP" in c:
+        return f"https://checkin.flytap.com/?locator={localizador}"
+    elif "AMERICAN" in c or "AA" in c:
+        return f"https://www.aa.com/checkin/main?recordLocator={localizador}"
+    return ""
 
-# ═══════════════════════════════════════════════════════════════
-# MÓDULO: ALERTAS AUTOMÁTICOS
-# ═══════════════════════════════════════════════════════════════
+# ── GMAIL ──────────────────────────────────────────────────────
+def get_gmail_service():
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials(
+        token=None,
+        refresh_token=GMAIL_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GMAIL_CLIENT_ID,
+        client_secret=GMAIL_CLIENT_SECRET,
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"]
+    )
+    return build("gmail", "v1", credentials=creds)
 
+def extract_email_body(msg):
+    import base64
+    body = ""
+    payload = msg.get("payload", {})
+    if "parts" in payload:
+        for part in payload["parts"]:
+            if part.get("mimeType") == "text/plain":
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    body += base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    else:
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            body = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    return body[:3000]
+
+async def scan_gmail_for_travel(max_results=20):
+    if not GMAIL_REFRESH_TOKEN:
+        return [{"erro": "Gmail nao configurado."}]
+    try:
+        service = get_gmail_service()
+        query = ("from:(latamairlines.com OR voegol.com OR voeazul.com OR tap.pt OR "
+                 "american.com OR booking.com OR hotels.com OR expedia.com OR "
+                 "smiles.com.br OR tudoazul.com OR livelo.com.br OR airbnb.com) "
+                 "newer_than:90d")
+        results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
+        messages = results.get("messages", [])
+        emails = []
+        for msg_ref in messages[:10]:
+            msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            emails.append({
+                "id": msg_ref["id"],
+                "assunto": headers.get("Subject", ""),
+                "de": headers.get("From", ""),
+                "data": headers.get("Date", ""),
+                "preview": extract_email_body(msg)[:500]
+            })
+        return emails
+    except Exception as e:
+        logger.error(f"Erro Gmail scan: {e}")
+        return [{"erro": str(e)}]
+
+async def check_gmail_for_changes(app):
+    if not AUTHORIZED_USERS or AUTHORIZED_USERS == [0] or not GMAIL_REFRESH_TOKEN:
+        return
+    user_id = AUTHORIZED_USERS[0]
+    try:
+        service = get_gmail_service()
+        query = ("from:(latamairlines.com OR voegol.com OR voeazul.com OR tap.pt) "
+                 "subject:(mudanca OR alteracao OR cancelado OR atraso OR change OR cancelled OR delayed) "
+                 "newer_than:1d")
+        results = service.users().messages().list(userId="me", q=query, maxResults=5).execute()
+        messages = results.get("messages", [])
+        wallet = load_wallet()
+        alertas = wallet.get("alertas_gmail", [])
+        for msg_ref in messages[:3]:
+            if msg_ref["id"] not in alertas:
+                msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+                headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                subject = headers.get("Subject", "")
+                sender = headers.get("From", "")
+                date = headers.get("Date", "")
+                body = extract_email_body(msg)
+                text = f"*Possivel mudanca de voo!*\n\nDe: {sender}\nAssunto: {subject}\nData: {date}\n\n{body[:300]}"
+                await app.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+                alertas.append(msg_ref["id"])
+        wallet["alertas_gmail"] = alertas[-50:]
+        save_wallet(wallet)
+    except Exception as e:
+        logger.error(f"Erro Gmail monitor: {e}")
+
+# ── ALERTS ─────────────────────────────────────────────────────
 async def check_and_send_alerts(app):
-    """Verifica e envia alertas para viagens próximas."""
     if not AUTHORIZED_USERS or AUTHORIZED_USERS == [0]:
         return
-
     wallet = load_wallet()
     agora = datetime.now()
     hoje = agora.date()
     user_id = AUTHORIZED_USERS[0]
-
     for voo in wallet["voos"]:
         try:
             data_str = voo.get("data", "")
             hora_str = voo.get("hora_partida", "00:00")
             data_voo = datetime.strptime(f"{data_str} {hora_str}", "%Y-%m-%d %H:%M")
-            dias_restantes = (data_voo.date() - hoje).days
-            horas_restantes = (data_voo - agora).total_seconds() / 3600
-
-            companhia = voo.get("companhia", "").upper()
+            horas = (data_voo - agora).total_seconds() / 3600
+            companhia = voo.get("companhia", "")
             localizador = voo.get("localizador", "")
             origem = voo.get("origem", "")
             destino = voo.get("destino", "")
-            voo_id = voo.get("id", "")
-
-            # Alerta 24h antes
-            if 23 <= horas_restantes <= 25 and not voo.get("alerta_24h_enviado"):
-                checkin_link = gerar_link_checkin(companhia, localizador, data_str)
-                msg = (
-                    f"⏰ *Lembrete de viagem — amanhã!*\n\n"
-                    f"✈️ {companhia} | {origem} → {destino}\n"
-                    f"📅 {data_voo.strftime('%d/%m/%Y às %H:%M')}\n"
-                    f"🎫 Localizador: `{localizador}`\n\n"
-                )
-                if checkin_link:
-                    msg += f"📲 *Check-in disponível!*\n👉 [Fazer check-in agora]({checkin_link})\n\n"
-                msg += "Lembre de levar documento e bagagem dentro do limite!"
-                
-                await app.bot.send_message(
-                    chat_id=user_id, text=msg,
-                    parse_mode="Markdown", disable_web_page_preview=True
-                )
-                voo["alerta_24h_enviado"] = True
-                save_wallet(wallet)
-
-            # Alerta check-in 48h antes (LATAM abre check-in 48h antes)
-            elif 47 <= horas_restantes <= 49 and not voo.get("alerta_checkin_enviado"):
-                checkin_link = gerar_link_checkin(companhia, localizador, data_str)
-                if checkin_link:
-                    msg = (
-                        f"🛫 *Check-in aberto para seu voo!*\n\n"
-                        f"✈️ {companhia} | {origem} → {destino}\n"
-                        f"📅 {data_voo.strftime('%d/%m/%Y às %H:%M')}\n"
-                        f"🎫 Localizador: `{localizador}`\n\n"
-                        f"👉 [Fazer check-in agora]({checkin_link})\n\n"
-                        f"_Faça agora para garantir seu assento de janela!_ 😊"
-                    )
-                    await app.bot.send_message(
-                        chat_id=user_id, text=msg,
-                        parse_mode="Markdown", disable_web_page_preview=True
-                    )
+            if 47 <= horas <= 49 and not voo.get("alerta_checkin_enviado"):
+                link = gerar_link_checkin(companhia, localizador, data_str)
+                if link:
+                    text = f"Checkin aberto!\n{companhia} {origem} -> {destino}\nLocalizador: {localizador}\n{link}"
+                    await app.bot.send_message(chat_id=user_id, text=text)
                     voo["alerta_checkin_enviado"] = True
                     save_wallet(wallet)
-
+            elif 23 <= horas <= 25 and not voo.get("alerta_24h_enviado"):
+                text = f"Voo amanha!\n{companhia} {origem} -> {destino}\n{data_voo.strftime('%d/%m/%Y %H:%M')}\nLocalizador: {localizador}"
+                await app.bot.send_message(chat_id=user_id, text=text)
+                voo["alerta_24h_enviado"] = True
+                save_wallet(wallet)
         except Exception as e:
-            logger.error(f"Erro ao processar alerta de voo: {e}")
-
+            logger.error(f"Erro alerta voo: {e}")
     for hotel in wallet["hoteis"]:
         try:
-            checkin_str = hotel.get("checkin", "")
-            checkout_str = hotel.get("checkout", "")
-            data_checkin = datetime.strptime(checkin_str, "%Y-%m-%d").date()
-            data_checkout = datetime.strptime(checkout_str, "%Y-%m-%d").date()
-            dias_checkin = (data_checkin - hoje).days
-
-            nome_hotel = hotel.get("nome", "Hotel")
-            endereco = hotel.get("endereco", "")
-
-            # Alerta 1 dia antes do check-in
-            if dias_checkin == 1 and not hotel.get("alerta_checkin_enviado"):
-                msg = (
-                    f"🏨 *Check-in amanhã!*\n\n"
-                    f"🏨 {nome_hotel}\n"
-                    f"📍 {endereco}\n"
-                    f"📅 Check-in: {data_checkin.strftime('%d/%m/%Y')}\n"
-                    f"📅 Check-out: {data_checkout.strftime('%d/%m/%Y')}\n"
-                    f"🔑 Confirmação: `{hotel.get('confirmacao', 'N/A')}`\n\n"
-                    f"_Horário de check-in: {hotel.get('horario_checkin', 'a partir das 14h')}_"
-                )
-                await app.bot.send_message(
-                    chat_id=user_id, text=msg, parse_mode="Markdown"
-                )
+            checkin = datetime.strptime(hotel.get("checkin",""), "%Y-%m-%d").date()
+            if (checkin - hoje).days == 1 and not hotel.get("alerta_checkin_enviado"):
+                text = f"Checkin amanha!\n{hotel.get('nome','Hotel')}\n{hotel.get('endereco','')}\nConfirmacao: {hotel.get('confirmacao','')}"
+                await app.bot.send_message(chat_id=user_id, text=text)
                 hotel["alerta_checkin_enviado"] = True
                 save_wallet(wallet)
-
         except Exception as e:
-            logger.error(f"Erro ao processar alerta de hotel: {e}")
-
-
-def gerar_link_checkin(companhia: str, localizador: str, data: str) -> str:
-    """Gera link de check-in para cada companhia."""
-    companhia = companhia.upper()
-    if not localizador:
-        return ""
-    
-    if "LATAM" in companhia or "LA" in companhia:
-        return f"https://www.latamairlines.com/br/pt/check-in?record={localizador}"
-    elif "GOL" in companhia or "G3" in companhia:
-        return f"https://checkin.voegol.com.br/?locator={localizador}"
-    elif "AZUL" in companhia or "AD" in companhia:
-        return f"https://checkin.voeazul.com.br/?locator={localizador}"
-    elif "TAP" in companhia:
-        return f"https://checkin.flytap.com/?locator={localizador}"
-    elif "AMERICAN" in companhia or "AA" in companhia:
-        return f"https://www.aa.com/checkin/main?recordLocator={localizador}"
-    else:
-        return ""
-
+            logger.error(f"Erro alerta hotel: {e}")
 
 async def scheduler_loop(app):
-    """Loop que roda a cada 30 minutos verificando alertas."""
     while True:
         try:
             await check_and_send_alerts(app)
+            await check_gmail_for_changes(app)
         except Exception as e:
-            logger.error(f"Erro no scheduler: {e}")
-        await asyncio.sleep(1800)  # 30 minutos
+            logger.error(f"Erro scheduler: {e}")
+        await asyncio.sleep(900)
 
-
-# ═══════════════════════════════════════════════════════════════
-# MÓDULO: SCRAPING DE MILHAS (Smiles e LATAM Pass)
-# ═══════════════════════════════════════════════════════════════
-
-async def scrape_smiles(cpf_ou_email: str, senha: str) -> dict:
-    """
-    Busca saldo Smiles via API interna do app mobile.
-    Mais estável que scraping de site — usa endpoint que o app usa.
-    """
+# ── SCRAPING ───────────────────────────────────────────────────
+async def scrape_smiles(cpf_ou_email, senha):
     try:
-        headers = {
-            "User-Agent": "okhttp/4.9.0",
-            "Content-Type": "application/json",
-            "channel": "mobileAndroid",
-            "accept-language": "pt-BR"
-        }
-        
-        # Login
+        headers = {"User-Agent": "okhttp/4.9.0", "Content-Type": "application/json", "channel": "mobileAndroid"}
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            login_resp = await client.post(
-                "https://api-auth.smiles.com.br/v1/auth/oauth/token",
-                json={
-                    "username": cpf_ou_email,
-                    "password": senha,
-                    "grant_type": "password",
-                    "client_id": "smiles-mobile"
-                },
-                headers=headers
-            )
-            
-            if login_resp.status_code != 200:
-                return {"erro": f"Login Smiles falhou (status {login_resp.status_code}). Verifique CPF e senha."}
-            
-            token_data = login_resp.json()
-            access_token = token_data.get("access_token", "")
-            
-            if not access_token:
-                return {"erro": "Não foi possível obter token Smiles."}
-            
-            # Buscar saldo
-            headers["Authorization"] = f"Bearer {access_token}"
-            saldo_resp = await client.get(
-                "https://api.smiles.com.br/v1/member/balance",
-                headers=headers
-            )
-            
-            if saldo_resp.status_code == 200:
-                saldo_data = saldo_resp.json()
-                saldo = saldo_data.get("miles", saldo_data.get("balance", 0))
-                categoria = saldo_data.get("tier", saldo_data.get("category", ""))
-                vencimento = saldo_data.get("expiration_date", "")
-                return {
-                    "programa": "Smiles",
-                    "saldo": saldo,
-                    "categoria": categoria,
-                    "vencimento": vencimento,
-                    "atualizado_em": datetime.now().isoformat()
-                }
-            else:
-                return {"erro": f"Erro ao buscar saldo Smiles (status {saldo_resp.status_code})."}
-                
-    except Exception as e:
-        return {"erro": f"Erro no scraping Smiles: {str(e)}"}
-
-
-async def scrape_latam(email: str, senha: str) -> dict:
-    """
-    Busca saldo LATAM Pass via API do site.
-    """
-    try:
-        async with httpx.AsyncClient(
-            timeout=20,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Accept-Language": "pt-BR,pt;q=0.9"
-            }
-        ) as client:
-            # Login LATAM
-            login_resp = await client.post(
-                "https://auth.latamairlines.com/oauth/token",
-                json={
-                    "username": email,
-                    "password": senha,
-                    "grant_type": "password",
-                    "client_id": "latam-app"
-                }
-            )
-            
-            if login_resp.status_code != 200:
-                return {"erro": f"Login LATAM falhou (status {login_resp.status_code}). Verifique email e senha."}
-            
-            token = login_resp.json().get("access_token", "")
+            resp = await client.post("https://api-auth.smiles.com.br/v1/auth/oauth/token",
+                json={"username": cpf_ou_email, "password": senha, "grant_type": "password", "client_id": "smiles-mobile"},
+                headers=headers)
+            if resp.status_code != 200:
+                return {"erro": f"Login Smiles falhou ({resp.status_code})"}
+            token = resp.json().get("access_token", "")
             if not token:
-                return {"erro": "Não foi possível obter token LATAM."}
-            
-            # Buscar perfil e saldo
-            perfil_resp = await client.get(
-                "https://api.latamairlines.com/v1/loyalty/member/profile",
-                headers={"Authorization": f"Bearer {token}"}
-            )
-            
-            if perfil_resp.status_code == 200:
-                dados = perfil_resp.json()
-                saldo = dados.get("miles", dados.get("balance", 0))
-                categoria = dados.get("tier", dados.get("category", ""))
-                return {
-                    "programa": "LATAM Pass",
-                    "saldo": saldo,
-                    "categoria": categoria,
-                    "atualizado_em": datetime.now().isoformat()
-                }
-            else:
-                return {"erro": f"Erro ao buscar saldo LATAM (status {perfil_resp.status_code})."}
-                
+                return {"erro": "Token Smiles nao obtido"}
+            headers["Authorization"] = f"Bearer {token}"
+            saldo_resp = await client.get("https://api.smiles.com.br/v1/member/balance", headers=headers)
+            if saldo_resp.status_code == 200:
+                d = saldo_resp.json()
+                return {"programa": "Smiles", "saldo": d.get("miles", d.get("balance", 0)),
+                        "categoria": d.get("tier", ""), "atualizado_em": datetime.now().isoformat()}
+            return {"erro": f"Saldo Smiles erro ({saldo_resp.status_code})"}
     except Exception as e:
-        return {"erro": f"Erro no scraping LATAM: {str(e)}"}
+        return {"erro": str(e)}
 
+async def scrape_latam(email, senha):
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.post("https://auth.latamairlines.com/oauth/token",
+                json={"username": email, "password": senha, "grant_type": "password", "client_id": "latam-app"})
+            if resp.status_code != 200:
+                return {"erro": f"Login LATAM falhou ({resp.status_code})"}
+            token = resp.json().get("access_token", "")
+            if not token:
+                return {"erro": "Token LATAM nao obtido"}
+            perfil = await client.get("https://api.latamairlines.com/v1/loyalty/member/profile",
+                headers={"Authorization": f"Bearer {token}"})
+            if perfil.status_code == 200:
+                d = perfil.json()
+                return {"programa": "LATAM Pass", "saldo": d.get("miles", 0),
+                        "categoria": d.get("tier", ""), "atualizado_em": datetime.now().isoformat()}
+            return {"erro": f"Saldo LATAM erro ({perfil.status_code})"}
+    except Exception as e:
+        return {"erro": str(e)}
 
+# ── NEW TOOL EXECUTORS ─────────────────────────────────────────
+async def tool_salvar_viagem(params, profile):
+    tipo = params.get("tipo", "")
+    dados = params.get("dados", {})
+    if tipo == "voo":
+        voo_id = wallet_add_voo(dados)
+        link = gerar_link_checkin(dados.get("companhia",""), dados.get("localizador",""), dados.get("data",""))
+        return json.dumps({"sucesso": True, "id": voo_id, "mensagem": f"Voo salvo! ID: {voo_id}",
+            "alertas": ["48h antes: lembrete checkin", "24h antes: lembrete viagem"],
+            "link_checkin": link or "Disponivel 48h antes"}, ensure_ascii=False)
+    elif tipo == "hotel":
+        hotel_id = wallet_add_hotel(dados)
+        return json.dumps({"sucesso": True, "id": hotel_id, "mensagem": f"Hotel salvo! ID: {hotel_id}",
+            "alertas": ["24h antes do checkin: lembrete automatico"]}, ensure_ascii=False)
+    return json.dumps({"erro": "Tipo invalido. Use voo ou hotel."})
 
+async def tool_ver_carteira(params, profile):
+    dias = params.get("dias", 90)
+    proximos = wallet_get_proximos(dias)
+    wallet = load_wallet()
+    voos = proximos["voos"]
+    hoteis = proximos["hoteis"]
+    if not voos and not hoteis:
+        return json.dumps({"mensagem": f"Nenhuma viagem nos proximos {dias} dias.",
+            "total": f"{len(wallet.get('voos',[]))} voos e {len(wallet.get('hoteis',[]))} hoteis no total."}, ensure_ascii=False)
+    resultado = {"proximos_voos": [], "proximas_reservas_hotel": []}
+    for v in voos:
+        link = gerar_link_checkin(v.get("companhia",""), v.get("localizador",""), v.get("data",""))
+        resultado["proximos_voos"].append({
+            "id": v.get("id"), "companhia": v.get("companhia"), "rota": f"{v.get('origem','')} -> {v.get('destino','')}",
+            "data": v.get("data"), "hora": v.get("hora_partida"), "localizador": v.get("localizador"),
+            "assento": v.get("assento","A confirmar"), "dias_restantes": v.get("dias_restantes",0),
+            "link_checkin": link or "Disponivel 48h antes"})
+    for h in hoteis:
+        resultado["proximas_reservas_hotel"].append({
+            "id": h.get("id"), "hotel": h.get("nome"), "checkin": h.get("checkin"),
+            "checkout": h.get("checkout"), "confirmacao": h.get("confirmacao"),
+            "dias_restantes": h.get("dias_restantes",0)})
+    return json.dumps(resultado, ensure_ascii=False, indent=2)
 
-# ═══════════════════════════════════════════════════════════════
-# EXECUTORES DAS NOVAS FERRAMENTAS
-# ═══════════════════════════════════════════════════════════════
+async def tool_atualizar_milhas_auto(params, profile):
+    programa = params.get("programa", "ambos")
+    resultados = {}
+    if programa in ["smiles", "ambos"]:
+        cpf = params.get("cpf_email_smiles","")
+        senha = params.get("senha_smiles","")
+        if not cpf or not senha:
+            resultados["smiles"] = {"erro": "Preciso do CPF/email e senha do Smiles."}
+        else:
+            r = await scrape_smiles(cpf, senha)
+            if "saldo" in r:
+                profile["fidelidades"]["smiles"]["saldo_estimado"] = r["saldo"]
+                if r.get("categoria"): profile["fidelidades"]["smiles"]["categoria"] = r["categoria"]
+                save_profile(profile)
+            resultados["smiles"] = r
+    if programa in ["latam_pass", "ambos"]:
+        email = params.get("email_latam","")
+        senha = params.get("senha_latam","")
+        if not email or not senha:
+            resultados["latam_pass"] = {"erro": "Preciso do email e senha do LATAM Pass."}
+        else:
+            r = await scrape_latam(email, senha)
+            if "saldo" in r:
+                profile["fidelidades"]["latam_pass"]["saldo_estimado"] = r["saldo"]
+                if r.get("categoria"): profile["fidelidades"]["latam_pass"]["categoria"] = r["categoria"]
+                save_profile(profile)
+            resultados["latam_pass"] = r
+    resultados["nota"] = "Senhas usadas apenas nesta sessao e nao armazenadas."
+    return json.dumps(resultados, ensure_ascii=False, indent=2)
+
+async def tool_verificar_gmail(params, profile):
+    acao = params.get("acao", "buscar_emails_viagem")
+    max_emails = params.get("max_emails", 10)
+    if not GMAIL_REFRESH_TOKEN:
+        return json.dumps({"erro": "Gmail nao configurado."})
+    emails = await scan_gmail_for_travel(max_emails)
+    if not emails:
+        return json.dumps({"resultado": "Nenhum email de viagem encontrado nos ultimos 90 dias."})
+    if acao == "buscar_emails_viagem":
+        return json.dumps({"total": len(emails), "emails": emails,
+            "instrucao": "Apresente os emails encontrados. Pergunte se quer importar para a carteira."
+        }, ensure_ascii=False, indent=2)
+    elif acao == "importar_para_carteira":
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        emails_text = json.dumps(emails[:5], ensure_ascii=False)
+        extraction = client_ai.messages.create(model="claude-opus-4-5", max_tokens=2000,
+            messages=[{"role": "user", "content": f"Analise estes emails e extraia viagens. Retorne apenas JSON array com campos: tipo (voo/hotel), e para voo: companhia,localizador,origem,destino,data(YYYY-MM-DD),hora_partida. Para hotel: nome,checkin,checkout,confirmacao,endereco. Emails: {emails_text[:3000]}"}])
+        try:
+            extracted = json.loads(extraction.content[0].text)
+            importados = []
+            for item in extracted:
+                if item.get("tipo") == "voo":
+                    vid = wallet_add_voo(item)
+                    importados.append(f"Voo {item.get('companhia')} {item.get('origem')}->{item.get('destino')} ({vid})")
+                elif item.get("tipo") == "hotel":
+                    hid = wallet_add_hotel(item)
+                    importados.append(f"Hotel {item.get('nome')} checkin {item.get('checkin')} ({hid})")
+            return json.dumps({"importados": importados, "total": len(importados),
+                "mensagem": f"{len(importados)} viagens importadas com alertas ativados!"}, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"erro": f"Erro ao processar: {str(e)}"})
+    return json.dumps({"erro": "Acao invalida."})
 
 
 TOOLS = [
@@ -598,6 +637,55 @@ TOOLS = [
         }
     },
     {
+        "name": "verificar_gmail",
+        "description": "Acessa o Gmail para buscar emails de viagem: passagens, hoteis, milhas e mudancas de voo. Use quando pedirem para verificar email ou importar viagens.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "acao": {"type": "string", "enum": ["buscar_emails_viagem", "importar_para_carteira"]},
+                "max_emails": {"type": "integer", "default": 10}
+            },
+            "required": ["acao"]
+        }
+    },
+    {
+        "name": "salvar_viagem",
+        "description": "Salva passagem ou reserva de hotel na carteira. Use quando usuario informar compra de passagem ou confirmacao de hotel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "enum": ["voo", "hotel"]},
+                "dados": {"type": "object"}
+            },
+            "required": ["tipo", "dados"]
+        }
+    },
+    {
+        "name": "ver_carteira",
+        "description": "Mostra viagens salvas. Use para proximas viagens, passagens, hoteis reservados.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dias": {"type": "integer", "default": 90}
+            }
+        }
+    },
+    {
+        "name": "atualizar_milhas_automatico",
+        "description": "Acessa Smiles e LATAM Pass automaticamente para buscar saldo de milhas.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "programa": {"type": "string", "enum": ["smiles", "latam_pass", "ambos"]},
+                "cpf_email_smiles": {"type": "string"},
+                "senha_smiles": {"type": "string"},
+                "email_latam": {"type": "string"},
+                "senha_latam": {"type": "string"}
+            },
+            "required": ["programa"]
+        }
+    },
+    {
         "name": "alertas_e_monitoramento",
         "description": (
             "Configura alertas de preço para voos ou hotéis, monitora disponibilidade "
@@ -667,144 +755,6 @@ TOOLS = [
 # ─────────────────────────────────────────────
 # EXECUTORES DAS FERRAMENTAS
 # ─────────────────────────────────────────────
-async def tool_salvar_viagem(params: dict, profile: dict) -> str:
-    tipo = params.get("tipo", "")
-    dados = params.get("dados", {})
-
-    if tipo == "voo":
-        voo_id = wallet_add_voo(dados)
-        companhia = dados.get("companhia", "")
-        link = gerar_link_checkin(companhia, dados.get("localizador", ""), dados.get("data", ""))
-        return json.dumps({
-            "sucesso": True,
-            "id": voo_id,
-            "mensagem": f"✅ Voo salvo na carteira! ID: {voo_id}",
-            "alertas_configurados": [
-                "48h antes — lembrete de check-in",
-                "24h antes — lembrete de viagem"
-            ],
-            "link_checkin": link or "Disponível 48h antes do voo"
-        }, ensure_ascii=False)
-
-    elif tipo == "hotel":
-        hotel_id = wallet_add_hotel(dados)
-        return json.dumps({
-            "sucesso": True,
-            "id": hotel_id,
-            "mensagem": f"✅ Hotel salvo na carteira! ID: {hotel_id}",
-            "alertas_configurados": ["24h antes do check-in — lembrete automático"]
-        }, ensure_ascii=False)
-
-    return json.dumps({"erro": "Tipo inválido. Use 'voo' ou 'hotel'."})
-
-
-async def tool_ver_carteira(params: dict, profile: dict) -> str:
-    dias = params.get("dias", 90)
-    proximos = wallet_get_proximos(dias)
-    wallet = load_wallet()
-
-    voos = proximos["voos"]
-    hoteis = proximos["hoteis"]
-
-    if not voos and not hoteis:
-        total_voos = len(wallet.get("voos", []))
-        total_hoteis = len(wallet.get("hoteis", []))
-        return json.dumps({
-            "mensagem": f"Nenhuma viagem nos próximos {dias} dias.",
-            "total_na_carteira": f"{total_voos} voos e {total_hoteis} hotéis registrados no total.",
-            "dica": "Para adicionar uma viagem, diga: 'Registrar voo LA3050 GRU→GIG dia 15/05'"
-        }, ensure_ascii=False)
-
-    resultado = {
-        "proximos_voos": [],
-        "proximas_reservas_hotel": [],
-        "total_viagens": len(voos) + len(hoteis)
-    }
-
-    for v in voos:
-        companhia = v.get("companhia", "")
-        localizador = v.get("localizador", "")
-        data = v.get("data", "")
-        link = gerar_link_checkin(companhia, localizador, data)
-        resultado["proximos_voos"].append({
-            "id": v.get("id"),
-            "companhia": companhia,
-            "voo": v.get("numero_voo", ""),
-            "rota": f"{v.get('origem', '')} → {v.get('destino', '')}",
-            "data": data,
-            "hora": v.get("hora_partida", ""),
-            "localizador": localizador,
-            "assento": v.get("assento", "A confirmar"),
-            "classe": v.get("classe", ""),
-            "dias_restantes": v.get("dias_restantes", 0),
-            "checkin_feito": v.get("checkin_feito", False),
-            "link_checkin": link or "Disponível 48h antes"
-        })
-
-    for h in hoteis:
-        resultado["proximas_reservas_hotel"].append({
-            "id": h.get("id"),
-            "hotel": h.get("nome", ""),
-            "endereco": h.get("endereco", ""),
-            "checkin": h.get("checkin", ""),
-            "checkout": h.get("checkout", ""),
-            "confirmacao": h.get("confirmacao", ""),
-            "horario_checkin": h.get("horario_checkin", "14h"),
-            "dias_restantes": h.get("dias_restantes", 0)
-        })
-
-    return json.dumps(resultado, ensure_ascii=False, indent=2)
-
-
-async def tool_atualizar_milhas_auto(params: dict, profile: dict) -> str:
-    programa = params.get("programa", "ambos")
-    resultados = {}
-
-    if programa in ["smiles", "ambos"]:
-        cpf_email = params.get("cpf_email_smiles", "")
-        senha = params.get("senha_smiles", "")
-        if not cpf_email or not senha:
-            resultados["smiles"] = {
-                "erro": "Para atualização automática, preciso do seu CPF/email e senha do Smiles. "
-                        "Diga: 'Meu login Smiles é [cpf/email] e minha senha é [senha]'"
-            }
-        else:
-            resultado_smiles = await scrape_smiles(cpf_email, senha)
-            if "saldo" in resultado_smiles:
-                # Atualiza perfil automaticamente
-                profile["fidelidades"]["smiles"]["saldo_estimado"] = resultado_smiles["saldo"]
-                if resultado_smiles.get("categoria"):
-                    profile["fidelidades"]["smiles"]["categoria"] = resultado_smiles["categoria"]
-                if resultado_smiles.get("vencimento"):
-                    profile["fidelidades"]["smiles"]["vencimento_proximo"] = resultado_smiles["vencimento"]
-                save_profile(profile)
-            resultados["smiles"] = resultado_smiles
-
-    if programa in ["latam_pass", "ambos"]:
-        email = params.get("email_latam", "")
-        senha = params.get("senha_latam", "")
-        if not email or not senha:
-            resultados["latam_pass"] = {
-                "erro": "Para atualização automática, preciso do seu email e senha do LATAM Pass. "
-                        "Diga: 'Meu login LATAM é [email] e minha senha é [senha]'"
-            }
-        else:
-            resultado_latam = await scrape_latam(email, senha)
-            if "saldo" in resultado_latam:
-                profile["fidelidades"]["latam_pass"]["saldo_estimado"] = resultado_latam["saldo"]
-                if resultado_latam.get("categoria"):
-                    profile["fidelidades"]["latam_pass"]["categoria"] = resultado_latam["categoria"]
-                save_profile(profile)
-            resultados["latam_pass"] = resultado_latam
-
-    resultados["nota"] = (
-        "⚠️ Senhas são usadas apenas nesta sessão e não ficam armazenadas. "
-        "Para máxima segurança, use uma senha específica para o app e não compartilhe sua senha principal."
-    )
-    return json.dumps(resultados, ensure_ascii=False, indent=2)
-
-
-
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1640,80 +1590,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Transcreve mensagem de voz via Whisper e processa como texto."""
-    if not is_authorized(update):
-        return
-
-    if not OPENAI_API_KEY:
-        await update.message.reply_text("⚠️ OPENAI_API_KEY não configurada para transcrição de voz.")
-        return
-
-    thinking = await update.message.reply_text("🎙️ Transcrevendo áudio...")
-
-    try:
-        # Download voice file from Telegram
-        voice = update.message.voice
-        file = await context.bot.get_file(voice.file_id)
-        
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp_path = tmp.name
-        
-        await file.download_to_drive(tmp_path)
-
-        # Transcribe with Whisper
-        async with httpx.AsyncClient(timeout=30) as client:
-            with open(tmp_path, "rb") as audio_file:
-                resp = await client.post(
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                    data={"model": "whisper-1", "language": "pt"},
-                    files={"file": ("audio.ogg", audio_file, "audio/ogg")}
-                )
-
-        os.unlink(tmp_path)
-
-        if resp.status_code != 200:
-            await thinking.delete()
-            await update.message.reply_text(f"⚠️ Erro na transcrição: {resp.status_code}")
-            return
-
-        text = resp.json().get("text", "").strip()
-        if not text:
-            await thinking.delete()
-            await update.message.reply_text("⚠️ Não consegui entender o áudio. Tente novamente.")
-            return
-
-        await thinking.edit_text(f"🎙️ *Você disse:* _{text}_\n\n⏳ Processando...", parse_mode="Markdown")
-
-        # Process transcribed text as normal message
-        profile = load_profile()
-        history = load_history()
-        response = await run_agent(text, profile, history)
-
-        history.append({"role": "user", "content": text})
-        history.append({"role": "assistant", "content": response})
-        save_history(history)
-
-        await thinking.delete()
-
-        if len(response) > 4000:
-            partes = [response[i:i+4000] for i in range(0, len(response), 4000)]
-            for parte in partes:
-                await update.message.reply_text(parte, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(response, parse_mode="Markdown")
-
-    except Exception as e:
-        logger.error(f"Erro no handler de voz: {e}")
-        try:
-            await thinking.delete()
-        except:
-            pass
-        await update.message.reply_text(f"⚠️ Erro ao processar áudio: {str(e)}")
-
-
 async def cmd_carteira(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
@@ -1731,6 +1607,66 @@ async def post_init(app):
         await scheduler_loop(app)
     asyncio.create_task(_start_scheduler())
     logger.info("Scheduler de alertas iniciado.")
+
+
+async def handle_voice(update, context):
+    if not is_authorized(update):
+        return
+    if not OPENAI_API_KEY:
+        await update.message.reply_text("OPENAI_API_KEY nao configurada.")
+        return
+    thinking = await update.message.reply_text("Transcrevendo audio...")
+    try:
+        import tempfile
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+        async with httpx.AsyncClient(timeout=30) as client:
+            with open(tmp_path, "rb") as af:
+                resp = await client.post("https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                    data={"model": "whisper-1", "language": "pt"},
+                    files={"file": ("audio.ogg", af, "audio/ogg")})
+        os.unlink(tmp_path)
+        if resp.status_code != 200:
+            await thinking.delete()
+            await update.message.reply_text(f"Erro transcricao: {resp.status_code}")
+            return
+        text = resp.json().get("text","").strip()
+        if not text:
+            await thinking.delete()
+            await update.message.reply_text("Nao entendi o audio.")
+            return
+        await thinking.edit_text(f"Voce disse: {text}\n\nProcessando...")
+        profile = load_profile()
+        history = load_history()
+        response = await run_agent(text, profile, history)
+        history.append({"role": "user", "content": text})
+        history.append({"role": "assistant", "content": response})
+        save_history(history)
+        await thinking.delete()
+        if len(response) > 4000:
+            for parte in [response[i:i+4000] for i in range(0, len(response), 4000)]:
+                await update.message.reply_text(parte, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(response, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Erro voz: {e}")
+        try:
+            await thinking.delete()
+        except:
+            pass
+        await update.message.reply_text(f"Erro ao processar audio: {str(e)}")
+
+async def cmd_gmail(update, context):
+    if not is_authorized(update):
+        return
+    profile = load_profile()
+    history = load_history()
+    resp = await run_agent("Verifique meu Gmail e busque emails de viagem.", profile, history)
+    await update.message.reply_text(resp, parse_mode="Markdown")
 
 
 def main():
@@ -1751,7 +1687,6 @@ def main():
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     logger.info("Bot rodando. Pressione Ctrl+C para parar.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
