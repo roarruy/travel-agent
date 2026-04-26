@@ -567,6 +567,25 @@ async def check_gmail_for_changes(app):
         logger.error(f"Erro Gmail monitor: {e}")
 
 # ── ALERTS ─────────────────────────────────────────────────────
+def gerar_link_checkin(companhia, localizador, data):
+    c = companhia.upper()
+    if not localizador:
+        return ""
+    if "LATAM" in c or "LA" in c:
+        return f"https://www.latamairlines.com/br/pt/check-in?record={localizador}"
+    elif "GOL" in c or "G3" in c:
+        return f"https://checkin.voegol.com.br/?locator={localizador}"
+    elif "AZUL" in c or "AD" in c:
+        return f"https://checkin.voeazul.com.br/?locator={localizador}"
+    elif "TAP" in c:
+        return f"https://checkin.flytap.com/?locator={localizador}"
+    elif "AMERICAN" in c or "AA" in c:
+        return f"https://www.aa.com/checkin/main?recordLocator={localizador}"
+    elif "IBERIA" in c or "IB" in c:
+        return f"https://www.iberia.com/us/online-check-in/?locator={localizador}"
+    return ""
+
+
 async def check_and_send_alerts(app):
     if not AUTHORIZED_USERS or AUTHORIZED_USERS == [0]:
         return
