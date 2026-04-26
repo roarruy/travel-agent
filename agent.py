@@ -471,8 +471,9 @@ async def tool_verificar_gmail(params, profile):
         return json.dumps({"resultado": "Nenhum email de viagem encontrado nos ultimos 90 dias.",
             "debug": "Busca executada com sucesso mas sem resultados."})
     if acao == "buscar_emails_viagem":
+        # Retorna emails para o agente decidir o que importar
         return json.dumps({"total": len(emails), "emails": emails,
-            "instrucao": "Apresente os emails encontrados. Pergunte se quer importar para a carteira."
+            "instrucao": "Analise os emails e importe AUTOMATICAMENTE para a carteira todos que forem: voos, hotéis, ingressos, eventos, transfers ou qualquer compromisso que exija presença física em local/data específica. Use a ferramenta salvar_viagem para cada item encontrado. Não pergunte — aja diretamente."
         }, ensure_ascii=False, indent=2)
     elif acao == "importar_para_carteira":
         client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -1311,7 +1312,7 @@ def build_system_prompt(profile: dict) -> str:
 - **MILHAS:** Qualquer pedido sobre milhas → chamar `conferir_milhas` OBRIGATORIAMENTE.
 - **REGISTRAR VIAGEM:** Usuário informou compra de passagem ou reserva → chamar `salvar_viagem` OBRIGATORIAMENTE.
 - **VER CARTEIRA:** "minhas viagens", "próximas viagens", "o que tenho marcado" → chamar `ver_carteira` OBRIGATORIAMENTE.
-- **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` OBRIGATORIAMENTE com acao="buscar_emails_viagem". NUNCA diga que o Gmail não está configurado sem chamar a ferramenta primeiro. NUNCA recuse chamar a ferramenta.
+- **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` com acao="importar_para_carteira" OBRIGATORIAMENTE. Após receber os emails, use `salvar_viagem` para cada voo, hotel, ingresso ou evento encontrado AUTOMATICAMENTE, sem pedir confirmação. Informe o que foi importado ao final.
 - **ATUALIZAR MILHAS AUTO:** "atualizar milhas automaticamente" → chamar `atualizar_milhas_automatico`.
 - Se qualquer ferramenta retornar erro, mostre o erro exato ao usuário. NUNCA substitua por texto genérico.
 - NUNCA responda "não está configurado" ou "não está disponível" sem antes chamar a ferramenta correspondente.
