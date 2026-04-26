@@ -241,15 +241,13 @@ async def scan_gmail_for_travel(max_results=20):
         warnings.filterwarnings("ignore")
         service = get_gmail_service()
         logger.info("Gmail service criado com sucesso")
-        query = ("from:(latamairlines.com OR voegol.com OR voeazul.com OR tap.pt OR "
-                 "american.com OR booking.com OR hotels.com OR expedia.com OR "
-                 "smiles.com.br OR tudoazul.com OR livelo.com.br OR airbnb.com) "
-                 "newer_than:90d")
+        # Lê toda a caixa de entrada — o usuário mantém lá apenas emails relevantes de viagem
+        query = "in:inbox newer_than:180d"
         results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
         messages = results.get("messages", [])
         logger.info(f"Gmail: {len(messages)} emails encontrados")
         emails = []
-        for msg_ref in messages[:10]:
+        for msg_ref in messages[:max_results]:
             msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
             headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
             emails.append({
@@ -460,7 +458,7 @@ async def tool_atualizar_milhas_auto(params, profile):
 
 async def tool_verificar_gmail(params, profile):
     acao = params.get("acao", "buscar_emails_viagem")
-    max_emails = params.get("max_emails", 10)
+    max_emails = params.get("max_emails", 50)
     if not GMAIL_REFRESH_TOKEN:
         return json.dumps({"erro": "GMAIL_REFRESH_TOKEN nao encontrado nas variaveis de ambiente."})
     emails = await scan_gmail_for_travel(max_emails)
