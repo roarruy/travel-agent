@@ -409,15 +409,17 @@ def save_extracted_items(extracted: list) -> list:
 
 
 EXTRACTION_PROMPT = (
-    "Voce e um especialista em extrair dados de viagem de documentos. "
-    "Analise o texto e extraia TODOS os itens: voos, hoteis, eventos, charters, transfers, ingressos. "
-    "Para cada item extraia o MAXIMO de dados disponiveis. "
+    "Voce e um especialista em extrair dados de viagem de emails. "
+    "Analise CADA email com muito cuidado e extraia TODOS os compromissos fisicos: "
+    "voos (INCLUDING connections/escalas), hoteis, eventos, charters, veleiros, transfers, cursos, shows, ingressos. "
+    "IMPORTANTE: cada trecho de voo e um item separado. Ex: GRU->EWR e EWR->EGE sao 2 itens. "
+    "Procure por: localizadores/PNR (6 letras/numeros), datas, horarios, codigos IATA de aeroportos, numeros de confirmacao. "
     "Retorne SOMENTE um JSON array valido, sem markdown, sem texto extra. "
     "Tipos aceitos: voo, hotel, evento, charter, veleiro, transfer. "
-    "Schema voo: {tipo,companhia,numero_voo,localizador,origem,destino,data,hora_partida,classe,assento,passageiros}. "
+    "Schema voo: {tipo,companhia,numero_voo,localizador,origem,destino,data,hora_partida,classe,assento}. "
     "Schema hotel: {tipo,nome,checkin,checkout,confirmacao,endereco,cidade,pais}. "
     "Schema outro: {tipo,nome,data_inicio,data_fim,local,cidade,confirmacao,detalhes,origem,destino}. "
-    "Datas no formato YYYY-MM-DD. Horarios HH:MM. "
+    "Datas YYYY-MM-DD. Horarios HH:MM. "
     "Se nao houver viagens retorne []."
 )
 
@@ -444,12 +446,19 @@ def extract_email_body(msg):
         except:
             return ""
     def strip_html(html):
+        # Preserve table structure for flight/hotel data
         clean = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL)
         clean = re.sub(r"<script[^>]*>.*?</script>", " ", clean, flags=re.DOTALL)
+        # Add newlines for table cells and rows to preserve structure
+        clean = re.sub(r"<td[^>]*>", " | ", clean)
+        clean = re.sub(r"<tr[^>]*>", "\n", clean)
+        clean = re.sub(r"<br[^>]*>", "\n", clean)
+        clean = re.sub(r"<p[^>]*>", "\n", clean)
+        clean = re.sub(r"<div[^>]*>", "\n", clean)
         clean = re.sub(r"<[^>]+>", " ", clean)
-        for ent, rep in [("&nbsp;"," "),("&amp;","&"),("&lt;","<"),("&gt;",">"),("&#39;","'"),("&quot;",'"')]:
+        for ent, rep in [("&nbsp;"," "),("&amp;","&"),("&lt;","<"),("&gt;",">"),("&#39;","'"),("&quot;",'"'),("&#34;",'"')]:
             clean = clean.replace(ent, rep)
-        return re.sub(r"\s+", " ", clean).strip()
+        return re.sub(r"[ \t]+", " ", clean).strip()
     def extract_parts(parts, depth=0):
         if depth > 6: return ""
         text = ""
@@ -479,7 +488,7 @@ async def scan_gmail_for_travel(max_results=50):
         import warnings; warnings.filterwarnings("ignore")
         service = get_gmail_service()
         logger.info("Gmail service OK")
-        query = "in:inbox newer_than:365d"
+        query = "in:inbox"
         results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
         messages = results.get("messages", [])
         logger.info(f"Gmail: {len(messages)} mensagens na inbox")
@@ -751,7 +760,7 @@ async def tool_atualizar_milhas_auto(params, profile):
     return json.dumps(resultados, ensure_ascii=False, indent=2)
 
 async def tool_verificar_gmail(params, profile):
-    max_emails = params.get("max_emails", 50)
+    max_emails = params.get("max_emails", 60)
     if not GMAIL_REFRESH_TOKEN:
         return json.dumps({"erro": "GMAIL_REFRESH_TOKEN nao encontrado."})
     emails = await scan_gmail_for_travel(max_emails)
@@ -763,14 +772,14 @@ async def tool_verificar_gmail(params, profile):
         client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         # Process in batches of 10 to fit context
         all_saved = []
-        batch_size = 10
+        batch_size = 15
         for i in range(0, len(emails), batch_size):
             batch = emails[i:i+batch_size]
             batch_text = json.dumps(batch, ensure_ascii=False)
             resp = client_ai.messages.create(
                 model="claude-opus-4-5",
-                max_tokens=4000,
-                messages=[{"role":"user","content": EXTRACTION_PROMPT + f"\n\nTexto dos emails:\n{batch_text[:9000]}"}]
+                max_tokens=8000,
+                messages=[{"role":"user","content": EXTRACTION_PROMPT + f"\n\nTexto dos emails:\n{batch_text[:12000]}"}]
             )
             raw = resp.content[0].text
             try:
