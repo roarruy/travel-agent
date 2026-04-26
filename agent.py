@@ -1033,6 +1033,23 @@ TOOLS = [
         }
     },
     {
+        "name": "buscar_por_localizador",
+        "description": (
+            "Busca detalhes de voo direto no site da GOL ou LATAM usando o localizador (PNR). "
+            "Extrai horários, assentos e detalhes completos e salva automaticamente na carteira. "
+            "Use quando o usuário informar um localizador de voo GOL ou LATAM."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "companhia": {"type": "string", "description": "Nome da companhia: GOL, LATAM, United, etc."},
+                "localizador": {"type": "string", "description": "Código localizador/PNR do voo (6 caracteres)"},
+                "sobrenome": {"type": "string", "description": "Sobrenome do passageiro", "default": "ARRUY"}
+            },
+            "required": ["companhia", "localizador"]
+        }
+    },
+    {
         "name": "alertas_e_monitoramento",
         "description": (
             "Configura alertas de preço para voos ou hotéis, monitora disponibilidade "
@@ -1048,6 +1065,112 @@ TOOLS = [
         }
     }
 ]
+async def tool_buscar_por_localizador(params: dict, profile: dict) -> str:
+    """Busca detalhes de voo direto no site da companhia usando o localizador (PNR)."""
+    companhia = params.get("companhia", "").upper()
+    localizador = params.get("localizador", "").upper().strip()
+    sobrenome = params.get("sobrenome", "ARRUY").upper().strip()
+
+    if not localizador:
+        return json.dumps({"erro": "Informe o localizador."})
+
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "pt-BR,pt;q=0.9",
+            "Content-Type": "application/json"
+        }
+
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers) as client:
+
+            if "GOL" in companhia or "G3" in companhia:
+                # GOL API
+                resp = await client.post(
+                    "https://api-air-flightsearch-prd.smiles.com.br/v1/airlines/retrieve",
+                    json={"recordLocator": localizador, "lastName": sobrenome, "channel": "WEB"}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                else:
+                    # Try alternative GOL endpoint
+                    resp2 = await client.get(
+                        f"https://b2c.voegol.com.br/api/booking/retrieve?locator={localizador}&lastName={sobrenome}"
+                    )
+                    data = resp2.json() if resp2.status_code == 200 else {}
+                
+                if data:
+                    # Extract flights from GOL response
+                    flights = []
+                    for trip in data.get("trips", data.get("journeys", [])):
+                        for seg in trip.get("segments", trip.get("legs", [])):
+                            flights.append({
+                                "tipo": "voo",
+                                "companhia": "GOL",
+                                "numero_voo": seg.get("flightNumber", seg.get("flight_number", "")),
+                                "localizador": localizador,
+                                "origem": seg.get("departure", {}).get("iataCode", seg.get("origin", "")),
+                                "destino": seg.get("arrival", {}).get("iataCode", seg.get("destination", "")),
+                                "data": seg.get("departure", {}).get("at", seg.get("departureDate", ""))[:10],
+                                "hora_partida": seg.get("departure", {}).get("at", seg.get("departureTime", ""))[11:16],
+                                "classe": seg.get("cabin", seg.get("class", ""))
+                            })
+                    if flights:
+                        saved = save_extracted_items(flights)
+                        return json.dumps({"sucesso": True, "salvos": saved, "raw": flights})
+                
+                return json.dumps({
+                    "erro": f"GOL não retornou dados para {localizador}",
+                    "sugestao": f"Acesse voegol.com.br/minhas-viagens com localizador {localizador} e sobrenome {sobrenome}"
+                })
+
+            elif "LATAM" in companhia or "LA" in companhia:
+                # LATAM API
+                resp = await client.get(
+                    f"https://api.latamairlines.com/v1/booking/{localizador}?lastName={sobrenome}",
+                    headers={**headers, "Origin": "https://www.latamairlines.com"}
+                )
+                if resp.status_code != 200:
+                    resp = await client.post(
+                        "https://api.latamairlines.com/v1/booking/retrieve",
+                        json={"pnr": localizador, "lastName": sobrenome}
+                    )
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    flights = []
+                    for seg in data.get("segments", data.get("flights", [])):
+                        flights.append({
+                            "tipo": "voo",
+                            "companhia": "LATAM",
+                            "numero_voo": seg.get("flightNumber", ""),
+                            "localizador": localizador,
+                            "origem": seg.get("departureStation", seg.get("origin", "")),
+                            "destino": seg.get("arrivalStation", seg.get("destination", "")),
+                            "data": seg.get("std", seg.get("departureDate", ""))[:10],
+                            "hora_partida": seg.get("std", seg.get("departureTime", ""))[11:16],
+                            "classe": seg.get("cabinType", "")
+                        })
+                    if flights:
+                        saved = save_extracted_items(flights)
+                        return json.dumps({"sucesso": True, "salvos": saved})
+                
+                return json.dumps({
+                    "erro": f"LATAM não retornou dados para {localizador}",
+                    "sugestao": f"Acesse latamairlines.com com localizador {localizador}"
+                })
+
+            else:
+                return json.dumps({
+                    "info": f"Busca automática disponível apenas para GOL e LATAM.",
+                    "instrucao": f"Me passe os detalhes do voo {companhia} {localizador} que eu salvo na carteira."
+                })
+
+    except Exception as e:
+        logger.error(f"tool_buscar_por_localizador error: {e}")
+        return json.dumps({"erro": str(e)})
+
+
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1065,6 +1188,8 @@ async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
         return await tool_montar_itinerario(tool_input, profile)
     elif tool_name == "atualizar_perfil":
         return await tool_atualizar_perfil(tool_input, profile)
+    elif tool_name == "buscar_por_localizador":
+        return await tool_buscar_por_localizador(tool_input, profile)
     elif tool_name == "alertas_e_monitoramento":
         return await tool_alertas(tool_input, profile)
     elif tool_name == "verificar_gmail":
@@ -1649,6 +1774,7 @@ def build_system_prompt(profile: dict) -> str:
 - **REGISTRAR VIAGEM:** Usuário informou compra de passagem ou reserva → chamar `salvar_viagem` OBRIGATORIAMENTE.
 - **VER CARTEIRA:** "minhas viagens", "próximas viagens", "o que tenho marcado" → chamar `ver_carteira` OBRIGATORIAMENTE.
 - **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` com acao="importar_para_carteira" OBRIGATORIAMENTE. Após receber os emails, use `salvar_viagem` para cada voo, hotel, ingresso ou evento encontrado AUTOMATICAMENTE, sem pedir confirmação. Informe o que foi importado ao final.
+- **BUSCAR POR LOCALIZADOR:** Quando usuário informar localizador GOL ou LATAM → chamar `buscar_por_localizador` IMEDIATAMENTE. Para outras companhias (United, American, Iberia) → chamar `salvar_viagem` com os dados informados.
 - **REGISTRAR MANUALMENTE:** Quando usuário informar dados de voo ou hotel diretamente (ex: "adicione voo GOL CGH->FLN dia 26/12 localizador OTDJGN") → chamar `salvar_viagem` IMEDIATAMENTE com os dados fornecidos. Confirme o que foi salvo. NÃO peça confirmação antes de salvar.
 - **ATUALIZAR MILHAS AUTO:** "atualizar milhas automaticamente" → chamar `atualizar_milhas_automatico`.
 - Se qualquer ferramenta retornar erro, mostre o erro exato ao usuário. NUNCA substitua por texto genérico.
