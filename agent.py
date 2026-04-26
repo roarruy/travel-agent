@@ -498,12 +498,50 @@ async def scan_gmail_for_travel(max_results=50):
                 msg = service.users().messages().get(userId="me", id=ref["id"], format="full").execute()
                 hdrs = {h["name"]: h["value"] for h in msg.get("payload",{}).get("headers",[])}
                 body = extract_email_body(msg)
+                
+                # Also extract PDF attachments
+                pdf_texts = []
+                def find_attachments(parts):
+                    for part in parts:
+                        mime = part.get("mimeType","")
+                        filename = part.get("filename","")
+                        if mime == "application/pdf" or filename.lower().endswith(".pdf"):
+                            att_id = part.get("body",{}).get("attachmentId","")
+                            if att_id:
+                                try:
+                                    att = service.users().messages().attachments().get(
+                                        userId="me", messageId=ref["id"], id=att_id
+                                    ).execute()
+                                    import base64, io
+                                    data = base64.urlsafe_b64decode(att["data"] + "==")
+                                    try:
+                                        import pypdf
+                                        reader = pypdf.PdfReader(io.BytesIO(data))
+                                        pdf_text = " ".join(p.extract_text() or "" for p in reader.pages)
+                                        if pdf_text.strip():
+                                            pdf_texts.append(f"[PDF: {filename}] {pdf_text[:3000]}")
+                                    except Exception as pe:
+                                        logger.error(f"PDF extract error: {pe}")
+                                except Exception as ae:
+                                    logger.error(f"Attachment download error: {ae}")
+                        if "parts" in part:
+                            find_attachments(part["parts"])
+                
+                payload = msg.get("payload", {})
+                if "parts" in payload:
+                    find_attachments(payload["parts"])
+                
+                full_content = body
+                if pdf_texts:
+                    full_content += " " + " ".join(pdf_texts)
+                    logger.info(f"Email '{hdrs.get('Subject','')}': {len(pdf_texts)} PDF(s) extraidos")
+                
                 emails.append({
                     "id": ref["id"],
                     "assunto": hdrs.get("Subject",""),
                     "de": hdrs.get("From",""),
                     "data_email": hdrs.get("Date",""),
-                    "corpo": body
+                    "corpo": full_content[:8000]
                 })
             except Exception as e:
                 logger.error(f"Erro lendo email {ref['id']}: {e}")
@@ -1611,6 +1649,7 @@ def build_system_prompt(profile: dict) -> str:
 - **REGISTRAR VIAGEM:** Usuário informou compra de passagem ou reserva → chamar `salvar_viagem` OBRIGATORIAMENTE.
 - **VER CARTEIRA:** "minhas viagens", "próximas viagens", "o que tenho marcado" → chamar `ver_carteira` OBRIGATORIAMENTE.
 - **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` com acao="importar_para_carteira" OBRIGATORIAMENTE. Após receber os emails, use `salvar_viagem` para cada voo, hotel, ingresso ou evento encontrado AUTOMATICAMENTE, sem pedir confirmação. Informe o que foi importado ao final.
+- **REGISTRAR MANUALMENTE:** Quando usuário informar dados de voo ou hotel diretamente (ex: "adicione voo GOL CGH->FLN dia 26/12 localizador OTDJGN") → chamar `salvar_viagem` IMEDIATAMENTE com os dados fornecidos. Confirme o que foi salvo. NÃO peça confirmação antes de salvar.
 - **ATUALIZAR MILHAS AUTO:** "atualizar milhas automaticamente" → chamar `atualizar_milhas_automatico`.
 - Se qualquer ferramenta retornar erro, mostre o erro exato ao usuário. NUNCA substitua por texto genérico.
 - NUNCA responda "não está configurado" ou "não está disponível" sem antes chamar a ferramenta correspondente.
