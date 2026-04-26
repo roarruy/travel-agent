@@ -476,24 +476,65 @@ async def tool_verificar_gmail(params, profile):
             "instrucao": "Analise os emails e importe AUTOMATICAMENTE para a carteira todos que forem: voos, hotéis, ingressos, eventos, transfers ou qualquer compromisso que exija presença física em local/data específica. Use a ferramenta salvar_viagem para cada item encontrado. Não pergunte — aja diretamente."
         }, ensure_ascii=False, indent=2)
     elif acao == "importar_para_carteira":
-        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        emails_text = json.dumps(emails[:5], ensure_ascii=False)
-        extraction = client_ai.messages.create(model="claude-opus-4-5", max_tokens=2000,
-            messages=[{"role": "user", "content": f"Analise estes emails e extraia viagens. Retorne apenas JSON array com campos: tipo (voo/hotel), e para voo: companhia,localizador,origem,destino,data(YYYY-MM-DD),hora_partida. Para hotel: nome,checkin,checkout,confirmacao,endereco. Emails: {emails_text[:3000]}"}])
         try:
-            extracted = json.loads(extraction.content[0].text)
+            client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            emails_text = json.dumps(emails[:10], ensure_ascii=False)
+            extraction = client_ai.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=3000,
+                messages=[{"role": "user", "content": (
+                    "Analise estes emails e extraia TODOS os compromissos que exigem presença física: "
+                    "voos, hotéis, eventos, ingressos, transfers, cursos presenciais. "
+                    "Retorne APENAS um JSON array válido, sem texto antes ou depois, sem markdown. "
+                    "Formato: [{tipo:voo,companhia,localizador,origem,destino,data:YYYY-MM-DD,hora_partida:HH:MM},{tipo:hotel,nome,checkin,checkout,confirmacao},{tipo:evento,nome,data,local}]. "
+                    "Se nao houver nada relevante, retorne []. "
+                    f"Emails: {emails_text[:4000]}"
+                )}]
+            )
+            
+            raw = extraction.content[0].text.strip()
+            logger.info(f"Gmail extraction raw: {raw[:200]}")
+            
+            # Clean possible markdown
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            raw = raw.strip()
+            
+            if not raw or raw == "[]":
+                return json.dumps({
+                    "resultado": "Nenhum compromisso de viagem encontrado nos emails.",
+                    "emails_analisados": len(emails)
+                }, ensure_ascii=False)
+            
+            extracted = json.loads(raw)
             importados = []
             for item in extracted:
-                if item.get("tipo") == "voo":
+                tipo = item.get("tipo", "")
+                if tipo == "voo":
                     vid = wallet_add_voo(item)
-                    importados.append(f"Voo {item.get('companhia')} {item.get('origem')}->{item.get('destino')} ({vid})")
-                elif item.get("tipo") == "hotel":
+                    importados.append(f"✈️ Voo {item.get('companhia','')} {item.get('origem','')}->{item.get('destino','')} em {item.get('data','')} ({vid})")
+                elif tipo == "hotel":
                     hid = wallet_add_hotel(item)
-                    importados.append(f"Hotel {item.get('nome')} checkin {item.get('checkin')} ({hid})")
-            return json.dumps({"importados": importados, "total": len(importados),
-                "mensagem": f"{len(importados)} viagens importadas com alertas ativados!"}, ensure_ascii=False)
+                    importados.append(f"🏨 {item.get('nome','')} checkin {item.get('checkin','')} ({hid})")
+                elif tipo == "evento":
+                    item["data_evento"] = item.get("data", "")
+                    eid = wallet_add_hotel(item)  # reusa estrutura de hotel para eventos
+                    importados.append(f"🎫 {item.get('nome','')} em {item.get('data','')} - {item.get('local','')} ({eid})")
+            
+            return json.dumps({
+                "importados": importados,
+                "total": len(importados),
+                "emails_analisados": len(emails),
+                "mensagem": f"✅ {len(importados)} itens importados para sua carteira com alertas ativados!"
+            }, ensure_ascii=False)
+            
+        except json.JSONDecodeError as e:
+            return json.dumps({"erro": f"Erro ao parsear resposta da IA: {str(e)}", "dica": "Tente novamente."})
         except Exception as e:
-            return json.dumps({"erro": f"Erro ao processar: {str(e)}"})
+            logger.error(f"Erro importar_para_carteira: {e}")
+            return json.dumps({"erro": f"Erro ao importar: {str(e)}"})
     return json.dumps({"erro": "Acao invalida."})
 
 
