@@ -732,6 +732,8 @@ async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
         return await tool_atualizar_perfil(tool_input, profile)
     elif tool_name == "alertas_e_monitoramento":
         return await tool_alertas(tool_input, profile)
+    elif tool_name == "verificar_gmail":
+        return await tool_verificar_gmail(tool_input, profile)
     elif tool_name == "salvar_viagem":
         return await tool_salvar_viagem(tool_input, profile)
     elif tool_name == "ver_carteira":
