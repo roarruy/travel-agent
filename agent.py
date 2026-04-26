@@ -2154,6 +2154,106 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
         await update.message.reply_text(f"Erro ao processar PDF: {e}")
 
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa imagens (PNG/JPG) enviadas pelo usuario e extrai informacoes de viagem."""
+    if not is_authorized(update):
+        return
+
+    thinking = await update.message.reply_text("🖼️ Lendo imagem...")
+
+    try:
+        # Get highest resolution photo
+        photo = update.message.photo[-1] if update.message.photo else None
+        document = update.message.document if update.message.document else None
+
+        import base64, io
+
+        if photo:
+            file = await context.bot.get_file(photo.file_id)
+        elif document and document.mime_type in ["image/png", "image/jpeg", "image/jpg", "image/webp"]:
+            file = await context.bot.get_file(document.file_id)
+        else:
+            await thinking.delete()
+            await update.message.reply_text("Envie uma imagem PNG, JPG ou um PDF.")
+            return
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+
+        with open(tmp_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+        os.unlink(tmp_path)
+
+        await thinking.edit_text("🖼️ Imagem recebida! Extraindo informacoes de viagem...")
+
+        # Use Claude vision to extract travel info
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = client_ai.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=4000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_data
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Analise esta imagem e extraia TODAS as informacoes de viagem: "
+                            "voos, hoteis, eventos, ingressos, confirmacoes. "
+                            "Retorne APENAS um JSON array valido sem markdown. "
+                            'Schema voo: {"tipo":"voo","companhia":"","numero_voo":"","localizador":"","origem":"","destino":"","data":"YYYY-MM-DD","hora_partida":"HH:MM","classe":"","assento":""}. '
+                            'Schema hotel: {"tipo":"hotel","nome":"","checkin":"YYYY-MM-DD","checkout":"YYYY-MM-DD","confirmacao":"","endereco":"","cidade":""}. '
+                            'Schema evento: {"tipo":"evento","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","local":"","cidade":"","confirmacao":""}. '
+                            "Se nao houver viagens retorne []."
+                        )
+                    }
+                ]
+            }]
+        )
+
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        if not raw or raw == "[]":
+            await thinking.delete()
+            await update.message.reply_text("Imagem lida mas nenhuma informacao de viagem encontrada.")
+            return
+
+        items = json.loads(raw)
+        saved = save_extracted_items(items)
+
+        await thinking.delete()
+        if saved:
+            msg = f"*{len(saved)} itens salvos na carteira:*\n\n"
+            msg += "\n".join(f"• {s}" for s in saved)
+            msg += "\n\n_Alertas automaticos ativados!_"
+        else:
+            msg = "Imagem lida mas nenhum item foi salvo."
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"handle_image error: {e}")
+        try:
+            await thinking.delete()
+        except:
+            pass
+        await update.message.reply_text(f"Erro ao processar imagem: {e}")
+
+
 def main():
     logger.info("Iniciando Agente de Viagens...")
     os.makedirs("data", exist_ok=True)
@@ -2172,7 +2272,9 @@ def main():
     app.add_handler(CommandHandler("carteira", cmd_carteira))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_image))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
