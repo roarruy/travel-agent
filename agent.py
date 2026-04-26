@@ -217,53 +217,137 @@ def get_gmail_service():
     )
     return build("gmail", "v1", credentials=creds)
 
+
+def save_extracted_items(extracted: list) -> list:
+    """Saves a list of extracted travel items to wallet. Returns list of save confirmations."""
+    saved = []
+    for item in extracted:
+        tipo = item.get("tipo", "")
+        try:
+            if tipo == "voo":
+                vid = wallet_add_voo(item)
+                saved.append(
+                    f"Voo {item.get('companhia','')} {item.get('origem','')}->"
+                    f"{item.get('destino','')} em {item.get('data','')} "
+                    f"{item.get('hora_partida','')} loc:{item.get('localizador','')} [{vid}]"
+                )
+            elif tipo == "hotel":
+                hid = wallet_add_hotel(item)
+                saved.append(
+                    f"Hotel {item.get('nome','')} checkin:{item.get('checkin','')} "
+                    f"checkout:{item.get('checkout','')} conf:{item.get('confirmacao','')} [{hid}]"
+                )
+            elif tipo in ["evento","charter","veleiro","cruzeiro","transfer"]:
+                item.setdefault("checkin", item.get("data_inicio", item.get("data","")))
+                item.setdefault("checkout", item.get("data_fim", item.get("checkin","")))
+                item.setdefault("nome", tipo.title())
+                item.setdefault("endereco", item.get("local", item.get("origem","")))
+                eid = wallet_add_hotel(item)
+                saved.append(
+                    f"{tipo.title()} {item.get('nome','')} "
+                    f"{item.get('checkin','')}~{item.get('checkout','')} [{eid}]"
+                )
+        except Exception as e:
+            logger.error(f"save_extracted_items erro {tipo}: {e}")
+    return saved
+
+
+EXTRACTION_PROMPT = (
+    "Voce e um especialista em extrair dados de viagem de documentos. "
+    "Analise o texto e extraia TODOS os itens: voos, hoteis, eventos, charters, transfers, ingressos. "
+    "Para cada item extraia o MAXIMO de dados disponiveis. "
+    "Retorne SOMENTE um JSON array valido, sem markdown, sem texto extra. "
+    "Tipos aceitos: voo, hotel, evento, charter, veleiro, transfer. "
+    "Schema voo: {tipo,companhia,numero_voo,localizador,origem,destino,data,hora_partida,classe,assento,passageiros}. "
+    "Schema hotel: {tipo,nome,checkin,checkout,confirmacao,endereco,cidade,pais}. "
+    "Schema outro: {tipo,nome,data_inicio,data_fim,local,cidade,confirmacao,detalhes,origem,destino}. "
+    "Datas no formato YYYY-MM-DD. Horarios HH:MM. "
+    "Se nao houver viagens retorne []."
+)
+
+
+def parse_extracted_json(raw: str) -> list:
+    """Parse JSON from Claude response, handling markdown fences."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else raw
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+    if not raw:
+        return []
+    return json.loads(raw)
+
+
 def extract_email_body(msg):
     import base64, re
-    body = ""
-    payload = msg.get("payload", {})
-    
-    def decode_part(data):
+    def decode(data):
         try:
             return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="ignore")
         except:
             return ""
-    
-    def extract_from_parts(parts, depth=0):
+    def strip_html(html):
+        clean = re.sub(r"<style[^>]*>.*?</style>", " ", html, flags=re.DOTALL)
+        clean = re.sub(r"<script[^>]*>.*?</script>", " ", clean, flags=re.DOTALL)
+        clean = re.sub(r"<[^>]+>", " ", clean)
+        for ent, rep in [("&nbsp;"," "),("&amp;","&"),("&lt;","<"),("&gt;",">"),("&#39;","'"),("&quot;",'"')]:
+            clean = clean.replace(ent, rep)
+        return re.sub(r"\s+", " ", clean).strip()
+    def extract_parts(parts, depth=0):
+        if depth > 6: return ""
         text = ""
-        if depth > 5:
-            return text
-        for part in parts:
-            mime = part.get("mimeType", "")
-            if mime == "text/plain":
-                data = part.get("body", {}).get("data", "")
-                if data:
-                    text += decode_part(data)
-            elif mime == "text/html" and not text:
-                data = part.get("body", {}).get("data", "")
-                if data:
-                    html = decode_part(data)
-                    # Strip HTML tags
-                    clean = re.sub(r'<[^>]+>', ' ', html)
-                    clean = re.sub(r'&nbsp;', ' ', clean)
-                    clean = re.sub(r'&amp;', '&', clean)
-                    clean = re.sub(r'\s+', ' ', clean)
-                    text += clean
-            elif "parts" in part:
-                text += extract_from_parts(part.get("parts", []), depth+1)
+        for p in parts:
+            mime = p.get("mimeType","")
+            data = p.get("body",{}).get("data","")
+            if mime == "text/plain" and data:
+                text += decode(data) + " "
+            elif mime == "text/html" and data and not text:
+                text += strip_html(decode(data)) + " "
+            elif "parts" in p:
+                text += extract_parts(p["parts"], depth+1)
         return text
-    
-    if "parts" in payload:
-        body = extract_from_parts(payload["parts"])
-    else:
-        data = payload.get("body", {}).get("data", "")
+    payload = msg.get("payload", {})
+    body = extract_parts(payload.get("parts", [])) if "parts" in payload else ""
+    if not body:
+        data = payload.get("body",{}).get("data","")
         if data:
-            body = decode_part(data)
-    
-    # Clean up whitespace
-    body = re.sub(r'\s+', ' ', body).strip()
-    return body[:6000]  # Increased to 6000 chars
+            raw = decode(data)
+            body = strip_html(raw) if "<" in raw else raw
+    return re.sub(r"\s+", " ", body).strip()[:8000]
 
-async def scan_gmail_for_travel(max_results=20):
+async def scan_gmail_for_travel(max_results=50):
+    if not GMAIL_REFRESH_TOKEN:
+        return [{"erro": "Gmail nao configurado."}]
+    try:
+        import warnings; warnings.filterwarnings("ignore")
+        service = get_gmail_service()
+        logger.info("Gmail service OK")
+        query = "in:inbox newer_than:365d"
+        results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
+        messages = results.get("messages", [])
+        logger.info(f"Gmail: {len(messages)} mensagens na inbox")
+        emails = []
+        for ref in messages:
+            try:
+                msg = service.users().messages().get(userId="me", id=ref["id"], format="full").execute()
+                hdrs = {h["name"]: h["value"] for h in msg.get("payload",{}).get("headers",[])}
+                body = extract_email_body(msg)
+                emails.append({
+                    "id": ref["id"],
+                    "assunto": hdrs.get("Subject",""),
+                    "de": hdrs.get("From",""),
+                    "data_email": hdrs.get("Date",""),
+                    "corpo": body
+                })
+            except Exception as e:
+                logger.error(f"Erro lendo email {ref['id']}: {e}")
+        logger.info(f"Gmail: {len(emails)} emails lidos com sucesso")
+        return emails
+    except Exception as e:
+        logger.error(f"Erro Gmail scan: {type(e).__name__}: {e}")
+        return [{"erro": f"{type(e).__name__}: {str(e)}"}]
+
     if not GMAIL_REFRESH_TOKEN:
         return [{"erro": "Gmail nao configurado."}]
     try:
@@ -492,102 +576,45 @@ async def tool_atualizar_milhas_auto(params, profile):
     return json.dumps(resultados, ensure_ascii=False, indent=2)
 
 async def tool_verificar_gmail(params, profile):
-    acao = params.get("acao", "buscar_emails_viagem")
     max_emails = params.get("max_emails", 50)
     if not GMAIL_REFRESH_TOKEN:
-        return json.dumps({"erro": "GMAIL_REFRESH_TOKEN nao encontrado nas variaveis de ambiente."})
+        return json.dumps({"erro": "GMAIL_REFRESH_TOKEN nao encontrado."})
     emails = await scan_gmail_for_travel(max_emails)
-    # Check if returned an error
-    if emails and isinstance(emails[0], dict) and "erro" in emails[0]:
-        return json.dumps({"erro_gmail": emails[0]["erro"],
-            "debug": f"GMAIL_REFRESH_TOKEN presente: {bool(GMAIL_REFRESH_TOKEN)}, CLIENT_ID presente: {bool(GMAIL_CLIENT_ID)}"
-        })
+    if emails and "erro" in emails[0]:
+        return json.dumps({"erro": emails[0]["erro"]})
     if not emails:
-        return json.dumps({"resultado": "Nenhum email de viagem encontrado nos ultimos 90 dias.",
-            "debug": "Busca executada com sucesso mas sem resultados."})
-    if acao == "buscar_emails_viagem":
-        # Retorna emails para o agente decidir o que importar
-        return json.dumps({"total": len(emails), "emails": emails,
-            "instrucao": "Analise os emails e importe AUTOMATICAMENTE para a carteira todos que forem: voos, hotéis, ingressos, eventos, transfers ou qualquer compromisso que exija presença física em local/data específica. Use a ferramenta salvar_viagem para cada item encontrado. Não pergunte — aja diretamente."
-        }, ensure_ascii=False, indent=2)
-    elif acao == "importar_para_carteira":
-        try:
-            client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            emails_text = json.dumps(emails[:10], ensure_ascii=False)
-            extraction = client_ai.messages.create(
+        return json.dumps({"resultado": "Inbox vazia ou sem emails no periodo."})
+    try:
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        # Process in batches of 10 to fit context
+        all_saved = []
+        batch_size = 10
+        for i in range(0, len(emails), batch_size):
+            batch = emails[i:i+batch_size]
+            batch_text = json.dumps(batch, ensure_ascii=False)
+            resp = client_ai.messages.create(
                 model="claude-opus-4-5",
-                max_tokens=3000,
-                messages=[{"role": "user", "content": (
-                    "Voce e um especialista em extrair informacoes de viagem de emails. "
-                    "Analise CADA email abaixo e extraia TODOS os compromissos fisicos: "
-                    "voos, hoteis, eventos, ingressos, transfers, charters, cruzeiros. "
-                    "Extraia o MAXIMO de detalhes: datas exatas, horarios, localizadores, origem, destino. "
-                    "Retorne APENAS JSON array valido sem markdown. "
-                    'Schema: [{"tipo":"voo","companhia":"","numero_voo":"","localizador":"","origem":"","destino":"","data":"YYYY-MM-DD","hora_partida":"HH:MM","classe":"","assento":""},'
-                    '{"tipo":"hotel","nome":"","checkin":"YYYY-MM-DD","checkout":"YYYY-MM-DD","confirmacao":"","endereco":"","cidade":""},'
-                    '{"tipo":"evento","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","local":"","cidade":"","confirmacao":""},'
-                    '{"tipo":"charter","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","origem":"","destino":"","confirmacao":""}] '
-                    "Se nada relevante, retorne []. "
-                    f"Emails:\n{emails_text[:8000]}"
-                )}]
+                max_tokens=4000,
+                messages=[{"role":"user","content": EXTRACTION_PROMPT + f"\n\nTexto dos emails:\n{batch_text[:9000]}"}]
             )
-            
-            raw = extraction.content[0].text.strip()
-            logger.info(f"Gmail extraction raw: {raw[:200]}")
-            
-            # Clean possible markdown
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            raw = raw.strip()
-            
-            if not raw or raw == "[]":
-                return json.dumps({
-                    "resultado": "Nenhum compromisso de viagem encontrado nos emails.",
-                    "emails_analisados": len(emails)
-                }, ensure_ascii=False)
-            
-            extracted = json.loads(raw)
-            importados = []
-            for item in extracted:
-                tipo = item.get("tipo", "")
-                if tipo == "voo":
-                    vid = wallet_add_voo(item)
-                    importados.append(f"✈️ Voo {item.get('companhia','')} {item.get('origem','')}->{item.get('destino','')} em {item.get('data','')} ({vid})")
-                elif tipo == "hotel":
-                    hid = wallet_add_hotel(item)
-                    importados.append(f"🏨 {item.get('nome','')} checkin {item.get('checkin','')} ({hid})")
-                elif tipo == "evento":
-                    item["checkin"] = item.get("data_inicio", item.get("data", ""))
-                    item["checkout"] = item.get("data_fim", item.get("data_inicio", item.get("data", "")))
-                    item["nome"] = item.get("nome", "Evento")
-                    item["endereco"] = item.get("local", item.get("cidade", ""))
-                    item["confirmacao"] = item.get("confirmacao", "")
-                    eid = wallet_add_hotel(item)
-                    importados.append(f"🎫 {item.get('nome','')} em {item.get('checkin','')} - {item.get('endereco','')} ({eid})")
-                elif tipo == "charter":
-                    item["checkin"] = item.get("data_inicio", "")
-                    item["checkout"] = item.get("data_fim", "")
-                    item["nome"] = item.get("nome", "Charter")
-                    item["endereco"] = f"{item.get('origem','')} -> {item.get('destino','')}"
-                    cid = wallet_add_hotel(item)
-                    importados.append(f"🛥️ {item.get('nome','')} em {item.get('checkin','')} ({cid})")
-            
-            return json.dumps({
-                "importados": importados,
-                "total": len(importados),
-                "emails_analisados": len(emails),
-                "mensagem": f"✅ {len(importados)} itens importados para sua carteira com alertas ativados!"
-            }, ensure_ascii=False)
-            
-        except json.JSONDecodeError as e:
-            return json.dumps({"erro": f"Erro ao parsear resposta da IA: {str(e)}", "dica": "Tente novamente."})
-        except Exception as e:
-            logger.error(f"Erro importar_para_carteira: {e}")
-            return json.dumps({"erro": f"Erro ao importar: {str(e)}"})
-    return json.dumps({"erro": "Acao invalida."})
-
+            raw = resp.content[0].text
+            try:
+                items = parse_extracted_json(raw)
+                if items:
+                    saved = save_extracted_items(items)
+                    all_saved.extend(saved)
+                    logger.info(f"Batch {i//batch_size+1}: {len(saved)} items saved")
+            except Exception as e:
+                logger.error(f"Batch {i//batch_size+1} parse error: {e} | raw: {raw[:200]}")
+        return json.dumps({
+            "emails_lidos": len(emails),
+            "itens_salvos": len(all_saved),
+            "carteira": all_saved,
+            "mensagem": f"{len(all_saved)} itens importados de {len(emails)} emails."
+        }, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"tool_verificar_gmail error: {e}")
+        return json.dumps({"erro": str(e)})
 
 TOOLS = [
     {
@@ -799,11 +826,6 @@ TOOLS = [
         }
     }
 ]
-
-
-# ─────────────────────────────────────────────
-# EXECUTORES DAS FERRAMENTAS
-# ─────────────────────────────────────────────
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1721,158 +1743,67 @@ async def cmd_gmail(update, context):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processa PDFs enviados pelo usuário e extrai informações de viagem."""
     if not is_authorized(update):
         return
-
     doc = update.message.document
     if not doc or doc.mime_type != "application/pdf":
-        await update.message.reply_text("Por favor, envie um arquivo PDF.")
+        await update.message.reply_text("Envie um arquivo PDF.")
         return
-
-    thinking = await update.message.reply_text("📄 Lendo o PDF...")
-
+    thinking = await update.message.reply_text("Lendo PDF...")
     try:
         import tempfile
         file = await context.bot.get_file(doc.file_id)
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp_path = tmp.name
         await file.download_to_drive(tmp_path)
-
-        # Extract text from PDF
+        # Extract text
         pdf_text = ""
         try:
-            import subprocess
-            result = subprocess.run(
-                ["python3", "-c", f"""
-import sys
-try:
-    import pypdf
-    reader = pypdf.PdfReader('{tmp_path}')
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    print(text[:8000])
-except ImportError:
-    try:
-        import pdfplumber
-        with pdfplumber.open('{tmp_path}') as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-        print(text[:8000])
-    except:
-        print("")
-"""],
-                capture_output=True, text=True, timeout=30
-            )
-            pdf_text = result.stdout.strip()
-        except Exception:
-            pass
-
-        os.unlink(tmp_path)
-
-        if not pdf_text:
+            import pypdf
+            reader = pypdf.PdfReader(tmp_path)
+            for page in reader.pages:
+                pdf_text += (page.extract_text() or "") + " "
+        except Exception as e:
+            logger.error(f"pypdf error: {e}")
+        finally:
+            try: os.unlink(tmp_path)
+            except: pass
+        if not pdf_text.strip():
             await thinking.delete()
-            await update.message.reply_text(
-                "⚠️ Não consegui extrair texto deste PDF. "
-                "Pode ser um PDF escaneado (imagem). "
-                "Tente copiar e colar o texto diretamente."
-            )
+            await update.message.reply_text("Nao consegui extrair texto deste PDF. Pode ser um PDF de imagem.")
             return
-
-        await thinking.edit_text("📄 PDF lido! Extraindo informações de viagem...")
-
-        # Use Claude to extract travel info
+        await thinking.edit_text("PDF lido! Extraindo viagens...")
         client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        extraction = client_ai.messages.create(
+        resp = client_ai.messages.create(
             model="claude-opus-4-5",
-            max_tokens=3000,
-            messages=[{"role": "user", "content": (
-                "Analise este documento e extraia TODAS as informações de viagem: "
-                "voos, hotéis, eventos, transfers, charters. "
-                "Retorne APENAS JSON array válido sem markdown. "
-                'Schema: [{"tipo":"voo","companhia":"","numero_voo":"","localizador":"","origem":"","destino":"","data":"YYYY-MM-DD","hora_partida":"HH:MM","classe":"","assento":""},'
-                '{"tipo":"hotel","nome":"","checkin":"YYYY-MM-DD","checkout":"YYYY-MM-DD","confirmacao":"","endereco":"","cidade":""},'
-                '{"tipo":"evento","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","local":"","cidade":"","confirmacao":""}] '
-                f"Documento:\n{pdf_text[:7000]}"
-            )}]
+            max_tokens=4000,
+            messages=[{"role":"user","content": EXTRACTION_PROMPT + f"\n\nDocumento:\n{pdf_text[:9000]}"}]
         )
-
-        raw = extraction.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
-
-        if not raw or raw == "[]":
-            await thinking.delete()
-            await update.message.reply_text(f"📄 Li o PDF mas nao encontrei informacoes de viagem.\n\nPreview:\n{pdf_text[:300]}...")
-
-
-
-
-
-
-            return
-
-        extracted = json.loads(raw)
-        importados = []
-
-        for item in extracted:
-            tipo = item.get("tipo", "")
-            try:
-                if tipo == "voo":
-                    vid = wallet_add_voo(item)
-                    importados.append(
-                        f"✈️ {item.get('companhia','')} {item.get('origem','')}"
-                        f"->{item.get('destino','')} em {item.get('data','')} "
-                        f"{item.get('hora_partida','')} | loc: {item.get('localizador','')}"
-                    )
-                elif tipo == "hotel":
-                    hid = wallet_add_hotel(item)
-                    importados.append(
-                        f"🏨 {item.get('nome','')} | "
-                        f"checkin: {item.get('checkin','')} checkout: {item.get('checkout','')}"
-                    )
-                elif tipo in ["evento", "charter", "veleiro", "cruzeiro"]:
-                    item["checkin"] = item.get("data_inicio", item.get("data", ""))
-                    item["checkout"] = item.get("data_fim", item.get("data_inicio", item.get("data", "")))
-                    item["nome"] = item.get("nome", tipo.title())
-                    item["endereco"] = item.get("local", item.get("origem", ""))
-                    eid = wallet_add_hotel(item)
-                    importados.append(
-                        f"🎫 {item.get('nome','')} | "
-                        f"{item.get('checkin','')} → {item.get('checkout','')}"
-                    )
-            except Exception as e:
-                logger.error(f"Erro ao salvar item {tipo}: {e}")
-                continue
-
-        await thinking.delete()
-
-
-        if importados:
-            msg = f"✅ *{len(importados)} itens salvos na carteira:*\n\n"
-            msg += "\n".join(f"• {item}" for item in importados)
-            msg += "\n\n_Alertas automaticos ativados!_"
-
-
-
-
-        else:
-            msg = "📄 PDF lido mas nenhuma viagem encontrada para importar."
-
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-    except Exception as e:
-        logger.error(f"Erro PDF: {e}")
+        raw = resp.content[0].text
         try:
+            items = parse_extracted_json(raw)
+        except Exception as e:
             await thinking.delete()
-        except:
-            pass
-        await update.message.reply_text(f"⚠️ Erro ao processar PDF: {str(e)}")
-
+            await update.message.reply_text(f"Erro ao interpretar PDF: {e}")
+            return
+        if not items:
+            await thinking.delete()
+            await update.message.reply_text("PDF lido mas nenhuma viagem encontrada.")
+            return
+        saved = save_extracted_items(items)
+        await thinking.delete()
+        if saved:
+            msg = f"*{len(saved)} itens salvos na carteira:*\n\n"
+            msg += "\n".join(f"• {s}" for s in saved)
+            msg += "\n\n_Alertas automaticos ativados!_"
+        else:
+            msg = "PDF processado mas nenhum item foi salvo."
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"handle_document error: {e}")
+        try: await thinking.delete()
+        except: pass
+        await update.message.reply_text(f"Erro ao processar PDF: {e}")
 
 def main():
     logger.info("Iniciando Agente de Viagens...")
