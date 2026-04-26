@@ -1818,30 +1818,48 @@ except ImportError:
 
         extracted = json.loads(raw)
         importados = []
-        profile = load_profile()
 
         for item in extracted:
             tipo = item.get("tipo", "")
-            if tipo == "voo":
-                vid = wallet_add_voo(item)
-                importados.append(f"✈️ Voo {item.get('companhia','')} {item.get('origem','')}->{item.get('destino','')} em {item.get('data','')} (loc: {item.get('localizador','')})")
-            elif tipo == "hotel":
-                hid = wallet_add_hotel(item)
-                importados.append(f"🏨 {item.get('nome','')} checkin {item.get('checkin','')} checkout {item.get('checkout','')}")
-            elif tipo == "evento":
-                item["checkin"] = item.get("data_inicio", "")
-                item["checkout"] = item.get("data_fim", item.get("data_inicio", ""))
-                item["nome"] = item.get("nome", "Evento")
-                item["endereco"] = item.get("local", "")
-                eid = wallet_add_hotel(item)
-                importados.append(f"🎫 {item.get('nome','')} em {item.get('checkin','')} - {item.get('endereco','')}")
+            try:
+                if tipo == "voo":
+                    vid = wallet_add_voo(item)
+                    importados.append(
+                        f"✈️ {item.get('companhia','')} {item.get('origem','')}"
+                        f"->{item.get('destino','')} em {item.get('data','')} "
+                        f"{item.get('hora_partida','')} | loc: {item.get('localizador','')}"
+                    )
+                elif tipo == "hotel":
+                    hid = wallet_add_hotel(item)
+                    importados.append(
+                        f"🏨 {item.get('nome','')} | "
+                        f"checkin: {item.get('checkin','')} checkout: {item.get('checkout','')}"
+                    )
+                elif tipo in ["evento", "charter", "veleiro", "cruzeiro"]:
+                    item["checkin"] = item.get("data_inicio", item.get("data", ""))
+                    item["checkout"] = item.get("data_fim", item.get("data_inicio", item.get("data", "")))
+                    item["nome"] = item.get("nome", tipo.title())
+                    item["endereco"] = item.get("local", item.get("origem", ""))
+                    eid = wallet_add_hotel(item)
+                    importados.append(
+                        f"🎫 {item.get('nome','')} | "
+                        f"{item.get('checkin','')} → {item.get('checkout','')}"
+                    )
+            except Exception as e:
+                logger.error(f"Erro ao salvar item {tipo}: {e}")
+                continue
 
         await thinking.delete()
 
+
         if importados:
-            msg = f"✅ *{len(importados)} itens importados do PDF:*\n\n"
-            msg += "\n".join(importados)
-            msg += "\n\n_Alertas automáticos ativados!_"
+            msg = f"✅ *{len(importados)} itens salvos na carteira:*\n\n"
+            msg += "\n".join(f"• {item}" for item in importados)
+            msg += "\n\n_Alertas automaticos ativados!_"
+
+
+
+
         else:
             msg = "📄 PDF lido mas nenhuma viagem encontrada para importar."
 
