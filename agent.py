@@ -96,112 +96,268 @@ DEFAULT_PROFILE = {
 }
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# MÓDULO: BANCO DE DADOS PostgreSQL (persistência permanente)
+# ═══════════════════════════════════════════════════════════════
+
+import psycopg2
+import psycopg2.extras
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+def get_db():
+    """Returns a database connection."""
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    """Creates tables if they don't exist."""
+    if not DATABASE_URL:
+        logger.warning("DATABASE_URL não configurado — usando arquivos locais")
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS profile (
+                key TEXT PRIMARY KEY,
+                value JSONB NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS wallet (
+                id TEXT PRIMARY KEY,
+                tipo TEXT NOT NULL,
+                dados JSONB NOT NULL,
+                criado_em TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id SERIAL PRIMARY KEY,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                criado_em TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gmail_alerts (
+                email_id TEXT PRIMARY KEY,
+                criado_em TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Banco de dados iniciado com sucesso")
+    except Exception as e:
+        logger.error(f"Erro ao iniciar banco: {e}")
+
+
+# ── Profile ───────────────────────────────────────────────────
+
 def load_profile() -> dict:
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM profile WHERE key = 'main'")
+            row = cur.fetchone()
+            cur.close(); conn.close()
+            if row:
+                return row[0]
+        except Exception as e:
+            logger.error(f"load_profile DB error: {e}")
+    # Fallback to file
     if os.path.exists(PROFILE_PATH):
         with open(PROFILE_PATH) as f:
             return json.load(f)
-    save_profile(DEFAULT_PROFILE)
-    return DEFAULT_PROFILE
-
+    return DEFAULT_PROFILE.copy()
 
 def save_profile(profile: dict):
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO profile (key, value, updated_at)
+                VALUES ('main', %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """, (json.dumps(profile),))
+            conn.commit()
+            cur.close(); conn.close()
+            return
+        except Exception as e:
+            logger.error(f"save_profile DB error: {e}")
+    # Fallback to file
     os.makedirs("data", exist_ok=True)
     with open(PROFILE_PATH, "w") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
 
-
 def load_history() -> list:
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT role, content FROM history ORDER BY id DESC LIMIT 20")
+            rows = cur.fetchall()
+            cur.close(); conn.close()
+            return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+        except Exception as e:
+            logger.error(f"load_history DB error: {e}")
     if os.path.exists(HISTORY_PATH):
         with open(HISTORY_PATH) as f:
             data = json.load(f)
-            # mantém só as últimas 20 mensagens por sessão
             return data[-20:] if len(data) > 20 else data
     return []
 
-
 def save_history(history: list):
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            # Keep only last 2 messages (the new ones)
+            if len(history) >= 2:
+                last = history[-2:]
+                for msg in last:
+                    cur.execute(
+                        "INSERT INTO history (role, content) VALUES (%s, %s)",
+                        (msg["role"], msg["content"])
+                    )
+                # Trim to last 50
+                cur.execute("DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY id DESC LIMIT 50)")
+            conn.commit()
+            cur.close(); conn.close()
+            return
+        except Exception as e:
+            logger.error(f"save_history DB error: {e}")
     os.makedirs("data", exist_ok=True)
     with open(HISTORY_PATH, "w") as f:
-        json.dump(history[-50:], f, ensure_ascii=False, indent=2)
+        json.dump(history[-50:], f, ensure_ascii=False)
 
 
-# ─────────────────────────────────────────────
-# FERRAMENTAS DO AGENTE
-# ─────────────────────────────────────────────
-# ── WALLET ─────────────────────────────────────────────────────
-WALLET_PATH = "data/wallet.json"
+# ── Wallet ────────────────────────────────────────────────────
 
-def load_wallet():
+def load_wallet() -> dict:
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT id, tipo, dados FROM wallet ORDER BY criado_em")
+            rows = cur.fetchall()
+            
+            cur.execute("SELECT email_id FROM gmail_alerts")
+            alerts = [r[0] for r in cur.fetchall()]
+            
+            cur.close(); conn.close()
+            
+            voos = [r[2] for r in rows if r[1] == "voo"]
+            hoteis = [r[2] for r in rows if r[1] in ("hotel", "evento", "charter", "veleiro")]
+            return {"voos": voos, "hoteis": hoteis, "alertas_gmail": alerts}
+        except Exception as e:
+            logger.error(f"load_wallet DB error: {e}")
     if os.path.exists(WALLET_PATH):
         with open(WALLET_PATH) as f:
             return json.load(f)
     return {"voos": [], "hoteis": [], "alertas_gmail": []}
 
-def save_wallet(wallet):
+def save_wallet(wallet: dict):
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            # Save gmail alerts
+            for alert_id in wallet.get("alertas_gmail", []):
+                cur.execute(
+                    "INSERT INTO gmail_alerts (email_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                    (alert_id,)
+                )
+            conn.commit()
+            cur.close(); conn.close()
+            return
+        except Exception as e:
+            logger.error(f"save_wallet DB error: {e}")
     os.makedirs("data", exist_ok=True)
     with open(WALLET_PATH, "w") as f:
         json.dump(wallet, f, ensure_ascii=False, indent=2)
 
-def wallet_add_voo(dados):
-    wallet = load_wallet()
+def wallet_add_voo(dados: dict) -> str:
     voo_id = f"VOO-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     dados["id"] = voo_id
     dados["criado_em"] = datetime.now().isoformat()
     dados["checkin_feito"] = False
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO wallet (id, tipo, dados) VALUES (%s, %s, %s) ON CONFLICT (id) DO UPDATE SET dados = EXCLUDED.dados",
+                (voo_id, "voo", json.dumps(dados))
+            )
+            conn.commit()
+            cur.close(); conn.close()
+            return voo_id
+        except Exception as e:
+            logger.error(f"wallet_add_voo DB error: {e}")
+    # Fallback
+    wallet = load_wallet()
     wallet["voos"].append(dados)
-    save_wallet(wallet)
+    os.makedirs("data", exist_ok=True)
+    with open(WALLET_PATH, "w") as f:
+        json.dump(wallet, f, ensure_ascii=False, indent=2)
     return voo_id
 
-def wallet_add_hotel(dados):
-    wallet = load_wallet()
+def wallet_add_hotel(dados: dict) -> str:
     hotel_id = f"HTL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     dados["id"] = hotel_id
     dados["criado_em"] = datetime.now().isoformat()
+    tipo = dados.get("tipo", "hotel")
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO wallet (id, tipo, dados) VALUES (%s, %s, %s) ON CONFLICT (id) DO UPDATE SET dados = EXCLUDED.dados",
+                (hotel_id, tipo, json.dumps(dados))
+            )
+            conn.commit()
+            cur.close(); conn.close()
+            return hotel_id
+        except Exception as e:
+            logger.error(f"wallet_add_hotel DB error: {e}")
+    # Fallback
+    wallet = load_wallet()
     wallet["hoteis"].append(dados)
-    save_wallet(wallet)
+    os.makedirs("data", exist_ok=True)
+    with open(WALLET_PATH, "w") as f:
+        json.dump(wallet, f, ensure_ascii=False, indent=2)
     return hotel_id
 
-def wallet_get_proximos(dias=90):
+def wallet_get_proximos(dias=90) -> dict:
     wallet = load_wallet()
     hoje = datetime.now().date()
     limite = hoje + timedelta(days=dias)
-    voos = []
+    voos, hoteis = [], []
     for v in wallet["voos"]:
         try:
             d = datetime.strptime(v.get("data",""), "%Y-%m-%d").date()
             if hoje <= d <= limite:
                 v["dias_restantes"] = (d - hoje).days
                 voos.append(v)
-        except:
-            pass
-    hoteis = []
+        except: pass
     for h in wallet["hoteis"]:
         try:
             d = datetime.strptime(h.get("checkin",""), "%Y-%m-%d").date()
             if hoje <= d <= limite:
                 h["dias_restantes"] = (d - hoje).days
                 hoteis.append(h)
-        except:
-            pass
+        except: pass
     voos.sort(key=lambda x: x.get("data",""))
     hoteis.sort(key=lambda x: x.get("checkin",""))
     return {"voos": voos, "hoteis": hoteis}
 
-def gerar_link_checkin(companhia, localizador, data):
-    c = companhia.upper()
-    if not localizador:
-        return ""
-    if "LATAM" in c or "LA" in c:
-        return f"https://www.latamairlines.com/br/pt/check-in?record={localizador}"
-    elif "GOL" in c or "G3" in c:
-        return f"https://checkin.voegol.com.br/?locator={localizador}"
-    elif "AZUL" in c or "AD" in c:
-        return f"https://checkin.voeazul.com.br/?locator={localizador}"
-    elif "TAP" in c:
-        return f"https://checkin.flytap.com/?locator={localizador}"
-    elif "AMERICAN" in c or "AA" in c:
-        return f"https://www.aa.com/checkin/main?recordLocator={localizador}"
-    return ""
+
 
 # ── GMAIL ──────────────────────────────────────────────────────
 def get_gmail_service():
@@ -1808,6 +1964,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     logger.info("Iniciando Agente de Viagens...")
     os.makedirs("data", exist_ok=True)
+    init_db()
 
     app = (
         Application.builder()
