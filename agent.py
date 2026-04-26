@@ -218,20 +218,50 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 def extract_email_body(msg):
-    import base64
+    import base64, re
     body = ""
     payload = msg.get("payload", {})
-    if "parts" in payload:
-        for part in payload["parts"]:
-            if part.get("mimeType") == "text/plain":
+    
+    def decode_part(data):
+        try:
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="ignore")
+        except:
+            return ""
+    
+    def extract_from_parts(parts, depth=0):
+        text = ""
+        if depth > 5:
+            return text
+        for part in parts:
+            mime = part.get("mimeType", "")
+            if mime == "text/plain":
                 data = part.get("body", {}).get("data", "")
                 if data:
-                    body += base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+                    text += decode_part(data)
+            elif mime == "text/html" and not text:
+                data = part.get("body", {}).get("data", "")
+                if data:
+                    html = decode_part(data)
+                    # Strip HTML tags
+                    clean = re.sub(r'<[^>]+>', ' ', html)
+                    clean = re.sub(r'&nbsp;', ' ', clean)
+                    clean = re.sub(r'&amp;', '&', clean)
+                    clean = re.sub(r'\s+', ' ', clean)
+                    text += clean
+            elif "parts" in part:
+                text += extract_from_parts(part.get("parts", []), depth+1)
+        return text
+    
+    if "parts" in payload:
+        body = extract_from_parts(payload["parts"])
     else:
         data = payload.get("body", {}).get("data", "")
         if data:
-            body = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
-    return body[:3000]
+            body = decode_part(data)
+    
+    # Clean up whitespace
+    body = re.sub(r'\s+', ' ', body).strip()
+    return body[:6000]  # Increased to 6000 chars
 
 async def scan_gmail_for_travel(max_results=20):
     if not GMAIL_REFRESH_TOKEN:
@@ -248,15 +278,20 @@ async def scan_gmail_for_travel(max_results=20):
         logger.info(f"Gmail: {len(messages)} emails encontrados")
         emails = []
         for msg_ref in messages[:max_results]:
-            msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
-            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-            emails.append({
-                "id": msg_ref["id"],
-                "assunto": headers.get("Subject", ""),
-                "de": headers.get("From", ""),
-                "data": headers.get("Date", ""),
-                "preview": extract_email_body(msg)[:500]
-            })
+            try:
+                msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+                headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                body = extract_email_body(msg)
+                emails.append({
+                    "id": msg_ref["id"],
+                    "assunto": headers.get("Subject", ""),
+                    "de": headers.get("From", ""),
+                    "data_email": headers.get("Date", ""),
+                    "corpo": body  # Full body for better extraction
+                })
+            except Exception as e:
+                logger.error(f"Erro ao ler email {msg_ref['id']}: {e}")
+                continue
         return emails
     except Exception as e:
         logger.error(f"Erro Gmail scan DETALHADO: {type(e).__name__}: {e}")
@@ -483,12 +518,17 @@ async def tool_verificar_gmail(params, profile):
                 model="claude-opus-4-5",
                 max_tokens=3000,
                 messages=[{"role": "user", "content": (
-                    "Analise estes emails e extraia TODOS os compromissos que exigem presença física: "
-                    "voos, hotéis, eventos, ingressos, transfers, cursos presenciais. "
-                    "Retorne APENAS um JSON array válido, sem texto antes ou depois, sem markdown. "
-                    "Formato: [{tipo:voo,companhia,localizador,origem,destino,data:YYYY-MM-DD,hora_partida:HH:MM},{tipo:hotel,nome,checkin,checkout,confirmacao},{tipo:evento,nome,data,local}]. "
-                    "Se nao houver nada relevante, retorne []. "
-                    f"Emails: {emails_text[:4000]}"
+                    "Voce e um especialista em extrair informacoes de viagem de emails. "
+                    "Analise CADA email abaixo e extraia TODOS os compromissos fisicos: "
+                    "voos, hoteis, eventos, ingressos, transfers, charters, cruzeiros. "
+                    "Extraia o MAXIMO de detalhes: datas exatas, horarios, localizadores, origem, destino. "
+                    "Retorne APENAS JSON array valido sem markdown. "
+                    'Schema: [{"tipo":"voo","companhia":"","numero_voo":"","localizador":"","origem":"","destino":"","data":"YYYY-MM-DD","hora_partida":"HH:MM","classe":"","assento":""},'
+                    '{"tipo":"hotel","nome":"","checkin":"YYYY-MM-DD","checkout":"YYYY-MM-DD","confirmacao":"","endereco":"","cidade":""},'
+                    '{"tipo":"evento","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","local":"","cidade":"","confirmacao":""},'
+                    '{"tipo":"charter","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","origem":"","destino":"","confirmacao":""}] '
+                    "Se nada relevante, retorne []. "
+                    f"Emails:\n{emails_text[:8000]}"
                 )}]
             )
             
@@ -519,9 +559,20 @@ async def tool_verificar_gmail(params, profile):
                     hid = wallet_add_hotel(item)
                     importados.append(f"🏨 {item.get('nome','')} checkin {item.get('checkin','')} ({hid})")
                 elif tipo == "evento":
-                    item["data_evento"] = item.get("data", "")
-                    eid = wallet_add_hotel(item)  # reusa estrutura de hotel para eventos
-                    importados.append(f"🎫 {item.get('nome','')} em {item.get('data','')} - {item.get('local','')} ({eid})")
+                    item["checkin"] = item.get("data_inicio", item.get("data", ""))
+                    item["checkout"] = item.get("data_fim", item.get("data_inicio", item.get("data", "")))
+                    item["nome"] = item.get("nome", "Evento")
+                    item["endereco"] = item.get("local", item.get("cidade", ""))
+                    item["confirmacao"] = item.get("confirmacao", "")
+                    eid = wallet_add_hotel(item)
+                    importados.append(f"🎫 {item.get('nome','')} em {item.get('checkin','')} - {item.get('endereco','')} ({eid})")
+                elif tipo == "charter":
+                    item["checkin"] = item.get("data_inicio", "")
+                    item["checkout"] = item.get("data_fim", "")
+                    item["nome"] = item.get("nome", "Charter")
+                    item["endereco"] = f"{item.get('origem','')} -> {item.get('destino','')}"
+                    cid = wallet_add_hotel(item)
+                    importados.append(f"🛥️ {item.get('nome','')} em {item.get('checkin','')} ({cid})")
             
             return json.dumps({
                 "importados": importados,
@@ -1669,6 +1720,142 @@ async def cmd_gmail(update, context):
     await update.message.reply_text(resp, parse_mode="Markdown")
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa PDFs enviados pelo usuário e extrai informações de viagem."""
+    if not is_authorized(update):
+        return
+
+    doc = update.message.document
+    if not doc or doc.mime_type != "application/pdf":
+        await update.message.reply_text("Por favor, envie um arquivo PDF.")
+        return
+
+    thinking = await update.message.reply_text("📄 Lendo o PDF...")
+
+    try:
+        import tempfile
+        file = await context.bot.get_file(doc.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+
+        # Extract text from PDF
+        pdf_text = ""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["python3", "-c", f"""
+import sys
+try:
+    import pypdf
+    reader = pypdf.PdfReader('{tmp_path}')
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    print(text[:8000])
+except ImportError:
+    try:
+        import pdfplumber
+        with pdfplumber.open('{tmp_path}') as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+        print(text[:8000])
+    except:
+        print("")
+"""],
+                capture_output=True, text=True, timeout=30
+            )
+            pdf_text = result.stdout.strip()
+        except Exception:
+            pass
+
+        os.unlink(tmp_path)
+
+        if not pdf_text:
+            await thinking.delete()
+            await update.message.reply_text(
+                "⚠️ Não consegui extrair texto deste PDF. "
+                "Pode ser um PDF escaneado (imagem). "
+                "Tente copiar e colar o texto diretamente."
+            )
+            return
+
+        await thinking.edit_text("📄 PDF lido! Extraindo informações de viagem...")
+
+        # Use Claude to extract travel info
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        extraction = client_ai.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": (
+                "Analise este documento e extraia TODAS as informações de viagem: "
+                "voos, hotéis, eventos, transfers, charters. "
+                "Retorne APENAS JSON array válido sem markdown. "
+                'Schema: [{"tipo":"voo","companhia":"","numero_voo":"","localizador":"","origem":"","destino":"","data":"YYYY-MM-DD","hora_partida":"HH:MM","classe":"","assento":""},'
+                '{"tipo":"hotel","nome":"","checkin":"YYYY-MM-DD","checkout":"YYYY-MM-DD","confirmacao":"","endereco":"","cidade":""},'
+                '{"tipo":"evento","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","local":"","cidade":"","confirmacao":""}] '
+                f"Documento:\n{pdf_text[:7000]}"
+            )}]
+        )
+
+        raw = extraction.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        if not raw or raw == "[]":
+            await thinking.delete()
+            await update.message.reply_text(f"📄 Li o PDF mas nao encontrei informacoes de viagem.\n\nPreview:\n{pdf_text[:300]}...")
+
+
+
+
+
+
+            return
+
+        extracted = json.loads(raw)
+        importados = []
+        profile = load_profile()
+
+        for item in extracted:
+            tipo = item.get("tipo", "")
+            if tipo == "voo":
+                vid = wallet_add_voo(item)
+                importados.append(f"✈️ Voo {item.get('companhia','')} {item.get('origem','')}->{item.get('destino','')} em {item.get('data','')} (loc: {item.get('localizador','')})")
+            elif tipo == "hotel":
+                hid = wallet_add_hotel(item)
+                importados.append(f"🏨 {item.get('nome','')} checkin {item.get('checkin','')} checkout {item.get('checkout','')}")
+            elif tipo == "evento":
+                item["checkin"] = item.get("data_inicio", "")
+                item["checkout"] = item.get("data_fim", item.get("data_inicio", ""))
+                item["nome"] = item.get("nome", "Evento")
+                item["endereco"] = item.get("local", "")
+                eid = wallet_add_hotel(item)
+                importados.append(f"🎫 {item.get('nome','')} em {item.get('checkin','')} - {item.get('endereco','')}")
+
+        await thinking.delete()
+
+        if importados:
+            msg = f"✅ *{len(importados)} itens importados do PDF:*\n\n"
+            msg += "\n".join(importados)
+            msg += "\n\n_Alertas automáticos ativados!_"
+        else:
+            msg = "📄 PDF lido mas nenhuma viagem encontrada para importar."
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Erro PDF: {e}")
+        try:
+            await thinking.delete()
+        except:
+            pass
+        await update.message.reply_text(f"⚠️ Erro ao processar PDF: {str(e)}")
+
+
 def main():
     logger.info("Iniciando Agente de Viagens...")
     os.makedirs("data", exist_ok=True)
@@ -1686,6 +1873,7 @@ def main():
     app.add_handler(CommandHandler("carteira", cmd_carteira))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
