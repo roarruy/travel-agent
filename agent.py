@@ -1089,6 +1089,11 @@ TOOLS = [
         }
     },
     {
+        "name": "limpar_duplicatas",
+        "description": "Remove duplicatas da carteira de viagens mantendo apenas um registro de cada voo e hotel. Use quando usuario pedir para limpar, organizar ou remover duplicatas da carteira.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
         "name": "listar_inbox",
         "description": "Lista todos os emails da inbox do Gmail com assunto, remetente e data. Use quando usuario pedir para ver inbox, listar emails ou diagnosticar o que esta na caixa de entrada.",
         "input_schema": {"type": "object", "properties": {}}
@@ -1312,6 +1317,71 @@ async def tool_listar_inbox(params: dict, profile: dict) -> str:
     except Exception as e:
         return json.dumps({"erro": str(e)})
 
+async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
+    """Remove duplicatas da carteira mantendo apenas o registro mais antigo de cada item."""
+    if not DATABASE_URL:
+        return json.dumps({"erro": "Banco de dados nao configurado."})
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        # Remove duplicate voos - keep oldest per localizador+origem+destino+data
+        cur.execute("""
+            DELETE FROM wallet
+            WHERE tipo = 'voo'
+            AND id NOT IN (
+                SELECT DISTINCT ON (
+                    dados->>'localizador',
+                    dados->>'origem',
+                    dados->>'destino',
+                    dados->>'data'
+                ) id
+                FROM wallet
+                WHERE tipo = 'voo'
+                ORDER BY
+                    dados->>'localizador',
+                    dados->>'origem',
+                    dados->>'destino',
+                    dados->>'data',
+                    criado_em ASC
+            )
+            RETURNING id
+        """)
+        voos_removidos = cur.rowcount
+
+        # Remove duplicate hoteis - keep oldest per nome+checkin OR confirmacao
+        cur.execute("""
+            DELETE FROM wallet
+            WHERE tipo NOT IN ('voo')
+            AND id NOT IN (
+                SELECT DISTINCT ON (
+                    COALESCE(NULLIF(dados->>'confirmacao', ''), dados->>'nome' || dados->>'checkin')
+                ) id
+                FROM wallet
+                WHERE tipo NOT IN ('voo')
+                ORDER BY
+                    COALESCE(NULLIF(dados->>'confirmacao', ''), dados->>'nome' || dados->>'checkin'),
+                    criado_em ASC
+            )
+            RETURNING id
+        """)
+        hoteis_removidos = cur.rowcount
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return json.dumps({
+            "sucesso": True,
+            "voos_duplicatas_removidas": voos_removidos,
+            "hoteis_duplicatas_removidas": hoteis_removidos,
+            "mensagem": f"Limpeza concluida! {voos_removidos} voos e {hoteis_removidos} hoteis duplicados removidos."
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"tool_limpar_duplicatas error: {e}")
+        return json.dumps({"erro": str(e)})
+
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1333,6 +1403,8 @@ async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
         return await tool_buscar_por_localizador(tool_input, profile)
     elif tool_name == "alertas_e_monitoramento":
         return await tool_alertas(tool_input, profile)
+    elif tool_name == "limpar_duplicatas":
+        return await tool_limpar_duplicatas(tool_input, profile)
     elif tool_name == "listar_inbox":
         return await tool_listar_inbox(tool_input, profile)
     elif tool_name == "verificar_gmail":
@@ -1916,6 +1988,7 @@ def build_system_prompt(profile: dict) -> str:
 - **MILHAS:** Qualquer pedido sobre milhas → chamar `conferir_milhas` OBRIGATORIAMENTE.
 - **REGISTRAR VIAGEM:** Usuário informou compra de passagem ou reserva → chamar `salvar_viagem` OBRIGATORIAMENTE.
 - **VER CARTEIRA:** "minhas viagens", "próximas viagens", "o que tenho marcado" → chamar `ver_carteira` OBRIGATORIAMENTE.
+- **LIMPAR DUPLICATAS:** "limpe duplicatas", "organize carteira", "remova repetidos" → chamar `limpar_duplicatas` OBRIGATORIAMENTE.
 - **LISTAR INBOX:** "liste meus emails", "o que tem na inbox", "mostre todos os emails" → chamar `listar_inbox` OBRIGATORIAMENTE.
 - **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` com acao="importar_para_carteira" OBRIGATORIAMENTE. Após receber os emails, use `salvar_viagem` para cada voo, hotel, ingresso ou evento encontrado AUTOMATICAMENTE, sem pedir confirmação. Informe o que foi importado ao final.
 - **BUSCAR POR LOCALIZADOR:** Quando usuário informar localizador GOL ou LATAM → chamar `buscar_por_localizador` IMEDIATAMENTE. Para outras companhias (United, American, Iberia) → chamar `salvar_viagem` com os dados informados.
