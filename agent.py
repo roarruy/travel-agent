@@ -133,6 +133,20 @@ def init_db():
                 criado_em TIMESTAMP DEFAULT NOW()
             )
         """)
+        # Migrate dados column to JSONB if it was created as TEXT
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'wallet'
+                    AND column_name = 'dados'
+                    AND data_type = 'text'
+                ) THEN
+                    ALTER TABLE wallet ALTER COLUMN dados TYPE JSONB USING dados::jsonb;
+                END IF;
+            END $$;
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id SERIAL PRIMARY KEY,
@@ -298,18 +312,18 @@ def wallet_add_voo(dados: dict) -> str:
                 cur.execute("""
                     SELECT id FROM wallet
                     WHERE tipo = 'voo'
-                    AND dados->>'localizador' = %s
-                    AND dados->>'origem' = %s
-                    AND dados->>'destino' = %s
-                    AND dados->>'data' = %s
+                    AND (dados::jsonb)->>'localizador' = %s
+                    AND (dados::jsonb)->>'origem' = %s
+                    AND (dados::jsonb)->>'destino' = %s
+                    AND (dados::jsonb)->>'data' = %s
                 """, (localizador, origem, destino, data))
             else:
                 cur.execute("""
                     SELECT id FROM wallet
                     WHERE tipo = 'voo'
-                    AND dados->>'origem' = %s
-                    AND dados->>'destino' = %s
-                    AND dados->>'data' = %s
+                    AND (dados::jsonb)->>'origem' = %s
+                    AND (dados::jsonb)->>'destino' = %s
+                    AND (dados::jsonb)->>'data' = %s
                 """, (origem, destino, data))
             existing = cur.fetchone()
             if existing:
@@ -357,7 +371,7 @@ def wallet_add_hotel(dados: dict) -> str:
             cur = conn.cursor()
             if confirmacao:
                 conf_key = confirmacao.split("|")[0].strip()[:20]
-                cur.execute("SELECT id FROM wallet WHERE dados->>'confirmacao' LIKE %s", (f"%{conf_key}%",))
+                cur.execute("SELECT id FROM wallet WHERE (dados::jsonb)->>'confirmacao' LIKE %s", (f"%{conf_key}%",))
             else:
                 cur.execute("SELECT id FROM wallet WHERE dados->>'nome' = %s AND dados->>'checkin' = %s", (nome, checkin))
             existing = cur.fetchone()
@@ -1331,18 +1345,18 @@ async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
             WHERE tipo = 'voo'
             AND id NOT IN (
                 SELECT DISTINCT ON (
-                    dados->>'localizador',
-                    dados->>'origem',
-                    dados->>'destino',
-                    dados->>'data'
+                    (dados::jsonb)->>'localizador',
+                    (dados::jsonb)->>'origem',
+                    (dados::jsonb)->>'destino',
+                    (dados::jsonb)->>'data'
                 ) id
                 FROM wallet
                 WHERE tipo = 'voo'
                 ORDER BY
-                    dados->>'localizador',
-                    dados->>'origem',
-                    dados->>'destino',
-                    dados->>'data',
+                    (dados::jsonb)->>'localizador',
+                    (dados::jsonb)->>'origem',
+                    (dados::jsonb)->>'destino',
+                    (dados::jsonb)->>'data',
                     criado_em ASC
             )
             RETURNING id
@@ -1355,12 +1369,12 @@ async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
             WHERE tipo NOT IN ('voo')
             AND id NOT IN (
                 SELECT DISTINCT ON (
-                    COALESCE(NULLIF(dados->>'confirmacao', ''), dados->>'nome' || dados->>'checkin')
+                    COALESCE(NULLIF((dados::jsonb)->>'confirmacao', ''), (dados::jsonb)->>'nome' || (dados::jsonb)->>'checkin')
                 ) id
                 FROM wallet
                 WHERE tipo NOT IN ('voo')
                 ORDER BY
-                    COALESCE(NULLIF(dados->>'confirmacao', ''), dados->>'nome' || dados->>'checkin'),
+                    COALESCE(NULLIF((dados::jsonb)->>'confirmacao', ''), (dados::jsonb)->>'nome' || (dados::jsonb)->>'checkin'),
                     criado_em ASC
             )
             RETURNING id
