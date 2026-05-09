@@ -2461,7 +2461,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[{"role": "user", "content": content_blocks}]
         )
 
-        raw = resp.content[0].text.strip()
+        # Extract text from response safely
+        raw = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                raw += block.text
+        raw = raw.strip()
+        
+        if not raw:
+            await thinking.delete()
+            await update.message.reply_text("Claude nao conseguiu extrair conteudo do PDF.")
+            return
         
         try:
             items = parse_extracted_json(raw)
