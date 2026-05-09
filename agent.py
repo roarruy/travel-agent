@@ -1328,54 +1328,55 @@ async def tool_listar_inbox(params: dict, profile: dict) -> str:
         return json.dumps({"erro": str(e)})
 
 async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
-    """Remove duplicatas da carteira mantendo apenas o registro mais antigo de cada item."""
+    """Remove duplicatas da carteira usando Python (sem depender de JSONB operators)."""
     if not DATABASE_URL:
         return json.dumps({"erro": "Banco de dados nao configurado."})
     try:
         conn = get_db()
         cur = conn.cursor()
 
-        # Remove duplicate voos - keep oldest per localizador+origem+destino+data
-        cur.execute("""
-            DELETE FROM wallet
-            WHERE tipo = 'voo'
-            AND id NOT IN (
-                SELECT DISTINCT ON (
-                    dados::jsonb->>'localizador',
-                    dados::jsonb->>'origem',
-                    dados::jsonb->>'destino',
-                    dados::jsonb->>'data'
-                ) id
-                FROM wallet
-                WHERE tipo = 'voo'
-                ORDER BY
-                    dados::jsonb->>'localizador',
-                    dados::jsonb->>'origem',
-                    dados::jsonb->>'destino',
-                    dados::jsonb->>'data',
-                    criado_em ASC
-            )
-            RETURNING id
-        """)
-        voos_removidos = cur.rowcount
+        # Fetch all items as text and parse in Python
+        cur.execute("SELECT id, tipo, dados, criado_em FROM wallet ORDER BY criado_em ASC")
+        rows = cur.fetchall()
 
-        # Remove duplicate hoteis - keep oldest per nome+checkin OR confirmacao
-        cur.execute("""
-            DELETE FROM wallet
-            WHERE tipo NOT IN ('voo')
-            AND id NOT IN (
-                SELECT DISTINCT ON (
-                    COALESCE(NULLIF(dados::jsonb->>'confirmacao', ''), dados::jsonb->>'nome' || dados::jsonb->>'checkin')
-                ) id
-                FROM wallet
-                WHERE tipo NOT IN ('voo')
-                ORDER BY
-                    COALESCE(NULLIF(dados::jsonb->>'confirmacao', ''), dados::jsonb->>'nome' || dados::jsonb->>'checkin'),
-                    criado_em ASC
-            )
-            RETURNING id
-        """)
-        hoteis_removidos = cur.rowcount
+        seen_voos = {}   # key -> id to keep
+        seen_hoteis = {} # key -> id to keep
+        ids_to_delete = []
+
+        for row_id, tipo, dados_raw, criado_em in rows:
+            try:
+                if isinstance(dados_raw, dict):
+                    dados = dados_raw
+                else:
+                    dados = json.loads(dados_raw)
+            except:
+                continue
+
+            if tipo == 'voo':
+                loc = dados.get('localizador', '')
+                orig = dados.get('origem', '')
+                dest = dados.get('destino', '')
+                data = dados.get('data', '')
+                key = f"{loc}|{orig}|{dest}|{data}"
+                if key in seen_voos:
+                    ids_to_delete.append(row_id)
+                else:
+                    seen_voos[key] = row_id
+            else:
+                conf = dados.get('confirmacao', '').split('|')[0].strip()[:20]
+                nome = dados.get('nome', '')
+                checkin = dados.get('checkin', '')
+                key = conf if conf else f"{nome}|{checkin}"
+                if key in seen_hoteis:
+                    ids_to_delete.append(row_id)
+                else:
+                    seen_hoteis[key] = row_id
+
+        # Delete duplicates
+        removidos = 0
+        for del_id in ids_to_delete:
+            cur.execute("DELETE FROM wallet WHERE id = %s", (del_id,))
+            removidos += 1
 
         conn.commit()
         cur.close()
@@ -1383,9 +1384,9 @@ async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
 
         return json.dumps({
             "sucesso": True,
-            "voos_duplicatas_removidas": voos_removidos,
-            "hoteis_duplicatas_removidas": hoteis_removidos,
-            "mensagem": f"Limpeza concluida! {voos_removidos} voos e {hoteis_removidos} hoteis duplicados removidos."
+            "duplicatas_removidas": removidos,
+            "itens_mantidos": len(seen_voos) + len(seen_hoteis),
+            "mensagem": f"Limpeza concluida! {removidos} duplicatas removidas. {len(seen_voos)} voos e {len(seen_hoteis)} hoteis na carteira."
         }, ensure_ascii=False)
 
     except Exception as e:
