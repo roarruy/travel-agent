@@ -283,10 +283,48 @@ def save_wallet(wallet: dict):
         json.dump(wallet, f, ensure_ascii=False, indent=2)
 
 def wallet_add_voo(dados: dict) -> str:
-    voo_id = f"VOO-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    localizador = dados.get("localizador", "")
+    origem = dados.get("origem", "")
+    destino = dados.get("destino", "")
+    data = dados.get("data", "")
+
+    # Check for duplicate before saving
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            # Check if same flight already exists (same localizador + origem + destino + data)
+            if localizador:
+                cur.execute("""
+                    SELECT id FROM wallet
+                    WHERE tipo = 'voo'
+                    AND dados->>'localizador' = %s
+                    AND dados->>'origem' = %s
+                    AND dados->>'destino' = %s
+                    AND dados->>'data' = %s
+                """, (localizador, origem, destino, data))
+            else:
+                cur.execute("""
+                    SELECT id FROM wallet
+                    WHERE tipo = 'voo'
+                    AND dados->>'origem' = %s
+                    AND dados->>'destino' = %s
+                    AND dados->>'data' = %s
+                """, (origem, destino, data))
+            existing = cur.fetchone()
+            if existing:
+                cur.close(); conn.close()
+                logger.info(f"Voo duplicado ignorado: {localizador} {origem}->{destino} {data}")
+                return existing[0]  # Return existing ID
+            cur.close(); conn.close()
+        except Exception as e:
+            logger.error(f"wallet_add_voo duplicate check error: {e}")
+
+    voo_id = f"VOO-{datetime.now().strftime('%Y%m%d%H%M%S%f')[:19]}"
     dados["id"] = voo_id
     dados["criado_em"] = datetime.now().isoformat()
     dados["checkin_feito"] = False
+
     if DATABASE_URL:
         try:
             conn = get_db()
@@ -300,7 +338,6 @@ def wallet_add_voo(dados: dict) -> str:
             return voo_id
         except Exception as e:
             logger.error(f"wallet_add_voo DB error: {e}")
-    # Fallback
     wallet = load_wallet()
     wallet["voos"].append(dados)
     os.makedirs("data", exist_ok=True)
@@ -309,10 +346,32 @@ def wallet_add_voo(dados: dict) -> str:
     return voo_id
 
 def wallet_add_hotel(dados: dict) -> str:
-    hotel_id = f"HTL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    nome = dados.get("nome", "")
+    checkin = dados.get("checkin", "")
+    confirmacao = dados.get("confirmacao", "")
+    tipo = dados.get("tipo", "hotel")
+
+    if DATABASE_URL:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            if confirmacao:
+                conf_key = confirmacao.split("|")[0].strip()[:20]
+                cur.execute("SELECT id FROM wallet WHERE dados->>'confirmacao' LIKE %s", (f"%{conf_key}%",))
+            else:
+                cur.execute("SELECT id FROM wallet WHERE dados->>'nome' = %s AND dados->>'checkin' = %s", (nome, checkin))
+            existing = cur.fetchone()
+            if existing:
+                cur.close(); conn.close()
+                logger.info(f"Hotel duplicado ignorado: {nome} {checkin}")
+                return existing[0]
+            cur.close(); conn.close()
+        except Exception as e:
+            logger.error(f"wallet_add_hotel duplicate check: {e}")
+
+    hotel_id = f"HTL-{datetime.now().strftime('%Y%m%d%H%M%S%f')[:19]}"
     dados["id"] = hotel_id
     dados["criado_em"] = datetime.now().isoformat()
-    tipo = dados.get("tipo", "hotel")
     if DATABASE_URL:
         try:
             conn = get_db()
@@ -326,7 +385,6 @@ def wallet_add_hotel(dados: dict) -> str:
             return hotel_id
         except Exception as e:
             logger.error(f"wallet_add_hotel DB error: {e}")
-    # Fallback
     wallet = load_wallet()
     wallet["hoteis"].append(dados)
     os.makedirs("data", exist_ok=True)
