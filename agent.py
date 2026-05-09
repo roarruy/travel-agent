@@ -633,6 +633,36 @@ def gerar_link_checkin(companhia, localizador, data):
     return ""
 
 
+def _alert_key(item_id: str, alert_type: str) -> str:
+    return f"alert:{item_id}:{alert_type}"
+
+def was_alert_sent(item_id: str, alert_type: str) -> bool:
+    if not DATABASE_URL:
+        return False
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS alerts_sent (alert_key TEXT PRIMARY KEY, sent_at TIMESTAMP DEFAULT NOW())")
+        cur.execute("SELECT 1 FROM alerts_sent WHERE alert_key = %s", (_alert_key(item_id, alert_type),))
+        result = cur.fetchone() is not None
+        conn.commit(); cur.close(); conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"was_alert_sent error: {e}")
+        return False
+
+def mark_alert_sent(item_id: str, alert_type: str):
+    if not DATABASE_URL:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS alerts_sent (alert_key TEXT PRIMARY KEY, sent_at TIMESTAMP DEFAULT NOW())")
+        cur.execute("INSERT INTO alerts_sent (alert_key) VALUES (%s) ON CONFLICT DO NOTHING", (_alert_key(item_id, alert_type),))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        logger.error(f"mark_alert_sent error: {e}")
+
 async def check_and_send_alerts(app):
     if not AUTHORIZED_USERS or AUTHORIZED_USERS == [0]:
         return
@@ -640,40 +670,57 @@ async def check_and_send_alerts(app):
     agora = datetime.now()
     hoje = agora.date()
     user_id = AUTHORIZED_USERS[0]
+
     for voo in wallet["voos"]:
         try:
             data_str = voo.get("data", "")
             hora_str = voo.get("hora_partida", "00:00")
-            data_voo = datetime.strptime(f"{data_str} {hora_str}", "%Y-%m-%d %H:%M")
+            if not data_str:
+                continue
+            try:
+                data_voo = datetime.strptime(f"{data_str} {hora_str}", "%Y-%m-%d %H:%M")
+            except:
+                data_voo = datetime.strptime(data_str, "%Y-%m-%d")
             horas = (data_voo - agora).total_seconds() / 3600
             companhia = voo.get("companhia", "")
             localizador = voo.get("localizador", "")
             origem = voo.get("origem", "")
             destino = voo.get("destino", "")
-            if 47 <= horas <= 49 and not voo.get("alerta_checkin_enviado"):
+            voo_id = voo.get("id", f"{localizador}_{data_str}")
+
+            if 46 <= horas <= 50 and not was_alert_sent(voo_id, "checkin_48h"):
                 link = gerar_link_checkin(companhia, localizador, data_str)
+                msg = f"*Check-in aberto!*\n\n{companhia} | {origem} -> {destino}\n{data_voo.strftime('%d/%m/%Y as %H:%M')}\nLocalizador: {localizador}"
                 if link:
-                    text = f"Checkin aberto!\n{companhia} {origem} -> {destino}\nLocalizador: {localizador}\n{link}"
-                    await app.bot.send_message(chat_id=user_id, text=text)
-                    voo["alerta_checkin_enviado"] = True
-                    save_wallet(wallet)
-            elif 23 <= horas <= 25 and not voo.get("alerta_24h_enviado"):
-                text = f"Voo amanha!\n{companhia} {origem} -> {destino}\n{data_voo.strftime('%d/%m/%Y %H:%M')}\nLocalizador: {localizador}"
-                await app.bot.send_message(chat_id=user_id, text=text)
-                voo["alerta_24h_enviado"] = True
-                save_wallet(wallet)
+                    msg += f"\n\n[Fazer check-in]({link})"
+                await app.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown", disable_web_page_preview=True)
+                mark_alert_sent(voo_id, "checkin_48h")
+                logger.info(f"Alerta checkin enviado: {voo_id}")
+
+            elif 23 <= horas <= 25 and not was_alert_sent(voo_id, "lembrete_24h"):
+                msg = f"*Voo amanha!*\n\n{companhia} | {origem} -> {destino}\n{data_voo.strftime('%d/%m/%Y as %H:%M')}\nLocalizador: {localizador}\n\nLembre do documento e bagagem!"
+                await app.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+                mark_alert_sent(voo_id, "lembrete_24h")
+                logger.info(f"Alerta 24h enviado: {voo_id}")
+
         except Exception as e:
-            logger.error(f"Erro alerta voo: {e}")
+            logger.error(f"Erro alerta voo {voo.get('id','?')}: {e}")
+
     for hotel in wallet["hoteis"]:
         try:
-            checkin = datetime.strptime(hotel.get("checkin",""), "%Y-%m-%d").date()
-            if (checkin - hoje).days == 1 and not hotel.get("alerta_checkin_enviado"):
-                text = f"Checkin amanha!\n{hotel.get('nome','Hotel')}\n{hotel.get('endereco','')}\nConfirmacao: {hotel.get('confirmacao','')}"
-                await app.bot.send_message(chat_id=user_id, text=text)
-                hotel["alerta_checkin_enviado"] = True
-                save_wallet(wallet)
+            checkin_str = hotel.get("checkin", "")
+            if not checkin_str:
+                continue
+            checkin = datetime.strptime(checkin_str, "%Y-%m-%d").date()
+            hotel_id = hotel.get("id", hotel.get("confirmacao", checkin_str))
+            if (checkin - hoje).days == 1 and not was_alert_sent(hotel_id, "checkin_hotel"):
+                msg = f"*Check-in amanha!*\n\n{hotel.get('nome','Hotel')}\n{hotel.get('endereco','')}\nConfirmacao: {hotel.get('confirmacao','N/A')}"
+                await app.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+                mark_alert_sent(hotel_id, "checkin_hotel")
+                logger.info(f"Alerta hotel enviado: {hotel_id}")
         except Exception as e:
-            logger.error(f"Erro alerta hotel: {e}")
+            logger.error(f"Erro alerta hotel {hotel.get('id','?')}: {e}")
+
 
 async def scheduler_loop(app):
     while True:
