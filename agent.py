@@ -2401,49 +2401,31 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"pypdf text error: {e}")
 
+        # Always try both: text + vision for best results
         if len(pdf_text.strip()) > 100:
-            # Good text extraction
-            content_blocks.append({
-                "type": "text",
-                "text": EXTRACTION_PROMPT + f"\n\nDocumento (texto extraído):\n{pdf_text[:9000]}"
-            })
+            # Text extraction worked well
+            content_blocks = [{"type": "text",
+                "text": EXTRACTION_PROMPT + f"\n\nDocumento:\n{pdf_text[:9000]}"}]
         else:
-            # Use vision - read PDF as base64 and send to Claude
+            # Send PDF directly to Claude as base64 document
             try:
                 with open(tmp_path, "rb") as f:
                     pdf_b64 = base64.b64encode(f.read()).decode()
-                
                 content_blocks = [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": EXTRACTION_PROMPT
-                    }
+                    {"type": "text", "text": EXTRACTION_PROMPT},
+                    {"type": "text", "text": "Analise o documento PDF a seguir e extraia todas as informacoes de viagem:"},
+                    {"type": "document", "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_b64
+                    }}
                 ]
+                logger.info(f"PDF enviado como documento base64: {len(pdf_b64)} chars")
             except Exception as e:
                 logger.error(f"PDF base64 error: {e}")
-                # Last resort: try image conversion
-                try:
-                    from pdf2image import convert_from_path
-                    pages = convert_from_path(tmp_path, dpi=150, first_page=1, last_page=2)
-                    for i, page_img in enumerate(pages):
-                        buf = io.BytesIO()
-                        page_img.save(buf, format="JPEG", quality=85)
-                        b64 = base64.b64encode(buf.getvalue()).decode()
-                        content_blocks.append({
-                            "type": "image",
-                            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
-                        })
-                    content_blocks.append({"type": "text", "text": EXTRACTION_PROMPT})
-                except Exception as e2:
-                    logger.error(f"pdf2image error: {e2}")
+                if pdf_text.strip():
+                    content_blocks = [{"type": "text",
+                        "text": EXTRACTION_PROMPT + f"\n\nTexto parcial:\n{pdf_text[:5000]}"}]
 
         try:
             os.unlink(tmp_path)
