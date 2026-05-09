@@ -2320,21 +2320,78 @@ async def cmd_gmail(update, context):
     await update.message.reply_text(resp, parse_mode="Markdown")
 
 
+async def pdf_to_images_base64(pdf_path: str) -> list:
+    """Converte PDF em lista de imagens base64 usando pypdf + pillow."""
+    images = []
+    try:
+        import pypdf, io, base64
+        reader = pypdf.PdfReader(pdf_path)
+        
+        # Try text extraction first (fast path)
+        full_text = ""
+        for page in reader.pages:
+            full_text += (page.extract_text() or "")
+        
+        if len(full_text.strip()) > 100:
+            # Text extraction worked, return as text
+            return [{"type": "text", "text": full_text[:9000]}]
+        
+        # Fall back to image rendering with pdf2image
+        try:
+            from pdf2image import convert_from_path
+            pages = convert_from_path(pdf_path, dpi=150, first_page=1, last_page=3)
+            for page_img in pages:
+                buf = io.BytesIO()
+                page_img.save(buf, format="JPEG", quality=85)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                images.append({"type": "image", "data": b64})
+            return images
+        except ImportError:
+            # pdf2image not available, try pypdf page images
+            for page in reader.pages[:3]:
+                for img_obj in page.images:
+                    try:
+                        b64 = base64.b64encode(img_obj.data).decode()
+                        images.append({"type": "image", "data": b64})
+                        break  # one image per page
+                    except:
+                        pass
+        
+        if not images and full_text:
+            return [{"type": "text", "text": full_text[:9000]}]
+            
+    except Exception as e:
+        logger.error(f"pdf_to_images error: {e}")
+    return images
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processa PDFs usando visao Claude (mais robusto para PDFs complexos)."""
     if not is_authorized(update):
         return
+
     doc = update.message.document
     if not doc or doc.mime_type != "application/pdf":
         await update.message.reply_text("Envie um arquivo PDF.")
         return
-    thinking = await update.message.reply_text("Lendo PDF...")
+
+    thinking = await update.message.reply_text("📄 Lendo PDF...")
+
     try:
-        import tempfile
+        import tempfile, base64, io
         file = await context.bot.get_file(doc.file_id)
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp_path = tmp.name
         await file.download_to_drive(tmp_path)
-        # Extract text
+
+        await thinking.edit_text("📄 Analisando PDF com visão IA...")
+
+        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        # Build content blocks for Claude
+        content_blocks = []
+
+        # Try text extraction first
         pdf_text = ""
         try:
             import pypdf
@@ -2342,46 +2399,114 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for page in reader.pages:
                 pdf_text += (page.extract_text() or "") + " "
         except Exception as e:
-            logger.error(f"pypdf error: {e}")
-        finally:
-            try: os.unlink(tmp_path)
-            except: pass
-        if not pdf_text.strip():
+            logger.error(f"pypdf text error: {e}")
+
+        if len(pdf_text.strip()) > 100:
+            # Good text extraction
+            content_blocks.append({
+                "type": "text",
+                "text": EXTRACTION_PROMPT + f"\n\nDocumento (texto extraído):\n{pdf_text[:9000]}"
+            })
+        else:
+            # Use vision - read PDF as base64 and send to Claude
+            try:
+                with open(tmp_path, "rb") as f:
+                    pdf_b64 = base64.b64encode(f.read()).decode()
+                
+                content_blocks = [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": EXTRACTION_PROMPT
+                    }
+                ]
+            except Exception as e:
+                logger.error(f"PDF base64 error: {e}")
+                # Last resort: try image conversion
+                try:
+                    from pdf2image import convert_from_path
+                    pages = convert_from_path(tmp_path, dpi=150, first_page=1, last_page=2)
+                    for i, page_img in enumerate(pages):
+                        buf = io.BytesIO()
+                        page_img.save(buf, format="JPEG", quality=85)
+                        b64 = base64.b64encode(buf.getvalue()).decode()
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+                        })
+                    content_blocks.append({"type": "text", "text": EXTRACTION_PROMPT})
+                except Exception as e2:
+                    logger.error(f"pdf2image error: {e2}")
+
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+        if not content_blocks:
             await thinking.delete()
-            await update.message.reply_text("Nao consegui extrair texto deste PDF. Pode ser um PDF de imagem.")
+            await update.message.reply_text("Nao consegui processar este PDF.")
             return
-        await thinking.edit_text("PDF lido! Extraindo viagens...")
-        client_ai = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
         resp = client_ai.messages.create(
             model="claude-opus-4-5",
             max_tokens=4000,
-            messages=[{"role":"user","content": EXTRACTION_PROMPT + f"\n\nDocumento:\n{pdf_text[:9000]}"}]
+            messages=[{"role": "user", "content": content_blocks}]
         )
-        raw = resp.content[0].text
+
+        raw = resp.content[0].text.strip()
+        
         try:
             items = parse_extracted_json(raw)
         except Exception as e:
-            await thinking.delete()
-            await update.message.reply_text(f"Erro ao interpretar PDF: {e}")
-            return
+            # If JSON parsing fails, Claude might have responded with explanation
+            # Try to extract any JSON array from the response
+            import re
+            json_match = re.search(r'\[.*?\]', raw, re.DOTALL)
+            if json_match:
+                try:
+                    items = json.loads(json_match.group())
+                except:
+                    items = []
+            else:
+                items = []
+
         if not items:
             await thinking.delete()
-            await update.message.reply_text("PDF lido mas nenhuma viagem encontrada.")
+            # Show what Claude saw for debugging
+            preview = raw[:300] if raw else "Nenhuma resposta"
+            await update.message.reply_text(
+                f"PDF lido mas nenhuma viagem encontrada.\n\n"
+                f"_Preview da analise:_ {preview}"
+            )
             return
+
         saved = save_extracted_items(items)
         await thinking.delete()
+
         if saved:
             msg = f"*{len(saved)} itens salvos na carteira:*\n\n"
             msg += "\n".join(f"• {s}" for s in saved)
             msg += "\n\n_Alertas automaticos ativados!_"
         else:
-            msg = "PDF processado mas nenhum item foi salvo."
+            msg = "PDF processado mas nenhum item novo para salvar (podem ja estar na carteira)."
+
         await update.message.reply_text(msg, parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"handle_document error: {e}")
-        try: await thinking.delete()
-        except: pass
-        await update.message.reply_text(f"Erro ao processar PDF: {e}")
+        try:
+            await thinking.delete()
+        except:
+            pass
+        await update.message.reply_text(f"Erro ao processar PDF: {str(e)[:200]}")
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Processa imagens (PNG/JPG) enviadas pelo usuario e extrai informacoes de viagem."""
