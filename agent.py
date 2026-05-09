@@ -1363,7 +1363,8 @@ async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
                 else:
                     seen_voos[key] = row_id
             else:
-                conf = dados.get('confirmacao', '').split('|')[0].strip()[:20]
+                conf_raw = dados.get('confirmacao') or ''
+                conf = conf_raw.split('|')[0].strip()[:20]
                 nome = dados.get('nome', '')
                 checkin = dados.get('checkin', '')
                 key = conf if conf else f"{nome}|{checkin}"
