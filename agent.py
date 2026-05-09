@@ -1031,6 +1031,11 @@ TOOLS = [
         }
     },
     {
+        "name": "listar_inbox",
+        "description": "Lista todos os emails da inbox do Gmail com assunto, remetente e data. Use quando usuario pedir para ver inbox, listar emails ou diagnosticar o que esta na caixa de entrada.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
         "name": "verificar_gmail",
         "description": "Acessa o Gmail para buscar emails de viagem: passagens, hoteis, milhas e mudancas de voo. Use quando pedirem para verificar email ou importar viagens.",
         "input_schema": {
@@ -1218,6 +1223,37 @@ async def tool_buscar_por_localizador(params: dict, profile: dict) -> str:
         return json.dumps({"erro": str(e)})
 
 
+async def tool_listar_inbox(params: dict, profile: dict) -> str:
+    """Lista todos os emails da inbox com assunto, remetente e data."""
+    if not GMAIL_REFRESH_TOKEN:
+        return json.dumps({"erro": "Gmail nao configurado."})
+    try:
+        import warnings; warnings.filterwarnings("ignore")
+        service = get_gmail_service()
+        results = service.users().messages().list(
+            userId="me", q="in:inbox", maxResults=60
+        ).execute()
+        messages = results.get("messages", [])
+        emails = []
+        for ref in messages:
+            msg = service.users().messages().get(
+                userId="me", id=ref["id"], format="metadata",
+                metadataHeaders=["Subject","From","Date"]
+            ).execute()
+            hdrs = {h["name"]: h["value"] for h in msg.get("payload",{}).get("headers",[])}
+            emails.append({
+                "assunto": hdrs.get("Subject",""),
+                "de": hdrs.get("From",""),
+                "data": hdrs.get("Date","")
+            })
+        return json.dumps({
+            "total": len(emails),
+            "emails": emails,
+            "instrucao": "Liste todos os emails encontrados em formato de tabela clara com data, remetente e assunto."
+        }, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({"erro": str(e)})
+
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1239,6 +1275,8 @@ async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
         return await tool_buscar_por_localizador(tool_input, profile)
     elif tool_name == "alertas_e_monitoramento":
         return await tool_alertas(tool_input, profile)
+    elif tool_name == "listar_inbox":
+        return await tool_listar_inbox(tool_input, profile)
     elif tool_name == "verificar_gmail":
         return await tool_verificar_gmail(tool_input, profile)
     elif tool_name == "salvar_viagem":
@@ -1820,6 +1858,7 @@ def build_system_prompt(profile: dict) -> str:
 - **MILHAS:** Qualquer pedido sobre milhas → chamar `conferir_milhas` OBRIGATORIAMENTE.
 - **REGISTRAR VIAGEM:** Usuário informou compra de passagem ou reserva → chamar `salvar_viagem` OBRIGATORIAMENTE.
 - **VER CARTEIRA:** "minhas viagens", "próximas viagens", "o que tenho marcado" → chamar `ver_carteira` OBRIGATORIAMENTE.
+- **LISTAR INBOX:** "liste meus emails", "o que tem na inbox", "mostre todos os emails" → chamar `listar_inbox` OBRIGATORIAMENTE.
 - **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` com acao="importar_para_carteira" OBRIGATORIAMENTE. Após receber os emails, use `salvar_viagem` para cada voo, hotel, ingresso ou evento encontrado AUTOMATICAMENTE, sem pedir confirmação. Informe o que foi importado ao final.
 - **BUSCAR POR LOCALIZADOR:** Quando usuário informar localizador GOL ou LATAM → chamar `buscar_por_localizador` IMEDIATAMENTE. Para outras companhias (United, American, Iberia) → chamar `salvar_viagem` com os dados informados.
 - **REGISTRAR MANUALMENTE:** Quando usuário informar dados de voo ou hotel diretamente (ex: "adicione voo GOL CGH->FLN dia 26/12 localizador OTDJGN") → chamar `salvar_viagem` IMEDIATAMENTE com os dados fornecidos. Confirme o que foi salvo. NÃO peça confirmação antes de salvar.
