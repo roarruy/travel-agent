@@ -2431,12 +2431,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     content_blocks = [{"type": "text",
                         "text": EXTRACTION_PROMPT + f"\n\nTexto parcial:\n{pdf_text[:5000]}"}]
 
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass
-
+        # Note: tmp_path deleted AFTER reading for API call
         if not content_blocks:
+            try: os.unlink(tmp_path)
+            except: pass
             await thinking.delete()
             await update.message.reply_text("Nao consegui processar este PDF.")
             return
@@ -2484,6 +2482,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        try: os.unlink(tmp_path)
+        except: pass
         saved = save_extracted_items(items)
         await thinking.delete()
 
