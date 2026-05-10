@@ -2646,7 +2646,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Envie uma imagem PNG, JPG ou um PDF.")
             return
 
-        import tempfile, imghdr
+        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as tmp:
             tmp_path = tmp.name
         await file.download_to_drive(tmp_path)
@@ -2654,15 +2654,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(tmp_path, "rb") as f:
             image_bytes = f.read()
         
-        # Detect actual image type
-        img_type = imghdr.what(None, h=image_bytes)
-        if img_type == "png":
-            media_type = "image/png"
-        elif img_type in ["jpeg", "jpg"]:
+        # Detect actual image type from magic bytes (no external module needed)
+        if image_bytes[:2] == b'\xff\xd8':
             media_type = "image/jpeg"
-        elif img_type == "gif":
+        elif image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            media_type = "image/png"
+        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
             media_type = "image/gif"
-        elif img_type == "webp":
+        elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
             media_type = "image/webp"
         else:
             media_type = "image/jpeg"  # default
