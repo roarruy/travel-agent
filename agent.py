@@ -474,6 +474,9 @@ def save_extracted_items(extracted: list) -> list:
             elif tipo == "milhas":
                 # Update profile with milhas balance
                 profile = load_profile()
+                # Ensure milhas key exists
+                if "milhas" not in profile:
+                    profile["milhas"] = {"latam_pass": 0, "smiles": 0, "livelo": 0, "tudoazul": 0}
                 programa = item.get("programa", "")
                 saldo = item.get("saldo", 0)
                 categoria = item.get("categoria", "")
