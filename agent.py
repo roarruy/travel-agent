@@ -2401,35 +2401,31 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"pypdf text error: {e}")
 
-        # Always try both: text + vision for best results
-        if len(pdf_text.strip()) > 100:
-            # Text extraction worked well
-            content_blocks = [{"type": "text",
-                "text": EXTRACTION_PROMPT + f"\n\nDocumento:\n{pdf_text[:9000]}"}]
-        else:
-            # Send PDF directly to Claude as base64 document
-            try:
-                import base64 as b64mod
-                with open(tmp_path, "rb") as f:
-                    pdf_bytes = f.read()
-                pdf_b64 = b64mod.standard_b64encode(pdf_bytes).decode("utf-8")
-                content_blocks = [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64
-                        }
-                    },
-                    {"type": "text", "text": EXTRACTION_PROMPT}
-                ]
-                logger.info(f"PDF enviado como documento: {len(pdf_bytes)} bytes")
-            except Exception as e:
-                logger.error(f"PDF base64 error: {e}")
-                if pdf_text.strip():
-                    content_blocks = [{"type": "text",
-                        "text": EXTRACTION_PROMPT + f"\n\nTexto parcial:\n{pdf_text[:5000]}"}]
+        # Always use base64 document approach (most reliable)
+        # Read file bytes for base64 BEFORE any deletion
+        try:
+            import base64 as b64mod
+            with open(tmp_path, "rb") as f:
+                pdf_bytes = f.read()
+            pdf_b64 = b64mod.standard_b64encode(pdf_bytes).decode("utf-8")
+            content_blocks = [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_b64
+                    }
+                },
+                {"type": "text", "text": EXTRACTION_PROMPT}
+            ]
+            logger.info(f"PDF preparado: {len(pdf_bytes)} bytes")
+        except Exception as e:
+            logger.error(f"PDF base64 error: {e}")
+            # Fallback to text if available
+            if len(pdf_text.strip()) > 50:
+                content_blocks = [{"type": "text",
+                    "text": EXTRACTION_PROMPT + f"\n\nDocumento:\n{pdf_text[:9000]}"}]
 
         # Note: tmp_path deleted AFTER reading for API call
         if not content_blocks:
@@ -2452,9 +2448,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raw += block.text
         raw = raw.strip()
         
+        # If vision returned empty and we have text, try text path as fallback
+        if not raw and len(pdf_text.strip()) > 50:
+            logger.info("Vision returned empty, trying text fallback")
+            resp2 = client_ai.messages.create(
+                model="claude-opus-4-5",
+                max_tokens=4000,
+                messages=[{"role": "user", "content": 
+                    EXTRACTION_PROMPT + f"\n\nDocumento:\n{pdf_text[:9000]}"}]
+            )
+            for block in resp2.content:
+                if hasattr(block, "text"):
+                    raw += block.text
+            raw = raw.strip()
+        
         if not raw:
             await thinking.delete()
-            await update.message.reply_text("Claude nao conseguiu extrair conteudo do PDF.")
+            await update.message.reply_text(
+                "PDF lido mas nao encontrei informacoes de viagem.\n"
+                "Tente enviar como imagem (screenshot) ou cole os dados no chat."
+            )
             return
         
         try:
