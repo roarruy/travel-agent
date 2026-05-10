@@ -2409,18 +2409,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # Send PDF directly to Claude as base64 document
             try:
+                import base64 as b64mod
                 with open(tmp_path, "rb") as f:
-                    pdf_b64 = base64.b64encode(f.read()).decode()
+                    pdf_bytes = f.read()
+                pdf_b64 = b64mod.standard_b64encode(pdf_bytes).decode("utf-8")
                 content_blocks = [
-                    {"type": "text", "text": EXTRACTION_PROMPT},
-                    {"type": "text", "text": "Analise o documento PDF a seguir e extraia todas as informacoes de viagem:"},
-                    {"type": "document", "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": pdf_b64
-                    }}
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64
+                        }
+                    },
+                    {"type": "text", "text": EXTRACTION_PROMPT}
                 ]
-                logger.info(f"PDF enviado como documento base64: {len(pdf_b64)} chars")
+                logger.info(f"PDF enviado como documento: {len(pdf_bytes)} bytes")
             except Exception as e:
                 logger.error(f"PDF base64 error: {e}")
                 if pdf_text.strip():
