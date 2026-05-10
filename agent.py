@@ -1408,14 +1408,19 @@ async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
         return json.dumps({"erro": str(e)})
 
 async def tool_remover_item(params: dict, profile: dict) -> str:
-    """Remove um item especifico da carteira por nome, data ou confirmacao."""
+    """Remove um item especifico da carteira. Matching ESTRITO para evitar remocoes em massa."""
     if not DATABASE_URL:
         return json.dumps({"erro": "Banco nao configurado."})
     
-    nome = params.get("nome", "").lower()
-    checkin = params.get("checkin", "")
-    confirmacao = params.get("confirmacao", "")
-    tipo = params.get("tipo", "")
+    nome = params.get("nome", "").lower().strip()
+    checkin = params.get("checkin", "").strip()
+    confirmacao = params.get("confirmacao", "").strip()
+    tipo = params.get("tipo", "").strip()
+    
+    # Require at least 2 criteria for safety
+    criteria_count = sum([bool(nome), bool(checkin), bool(confirmacao)])
+    if criteria_count < 1:
+        return json.dumps({"erro": "Informe pelo menos nome+checkin ou confirmacao para remover."})
     
     try:
         conn = get_db()
@@ -1430,33 +1435,49 @@ async def tool_remover_item(params: dict, profile: dict) -> str:
             except:
                 continue
             
-            match = False
-            
-            # Match by confirmacao
+            # STRICT matching - confirmacao must match exactly (ignoring dots/spaces)
             if confirmacao:
-                conf = (dados.get("confirmacao") or "").replace(".", "")
-                if confirmacao.replace(".", "") in conf or conf in confirmacao.replace(".", ""):
-                    match = True
+                conf_clean = confirmacao.replace(".", "").replace(" ", "").replace("-", "").lower()
+                item_conf = (dados.get("confirmacao") or "").replace(".", "").replace(" ", "").replace("-", "").lower()
+                # Only match if confirmacao is EXACT and item has a nome/checkin match too
+                if conf_clean == item_conf and conf_clean:
+                    # Also require nome or checkin to match if provided
+                    if nome:
+                        item_nome = (dados.get("nome") or "").lower()
+                        if nome not in item_nome and item_nome not in nome:
+                            continue  # Skip - nome doesn't match
+                    if checkin:
+                        if dados.get("checkin","") != checkin:
+                            continue  # Skip - checkin doesn't match
+                    ids_to_delete.append((row_id, dados.get("nome", row_tipo), dados.get("checkin", "")))
+                continue
             
-            # Match by nome + checkin
-            if nome and not match:
+            # Match by nome + checkin (BOTH required)
+            if nome and checkin:
                 item_nome = (dados.get("nome") or "").lower()
                 item_checkin = dados.get("checkin", "")
-                if nome in item_nome or item_nome in nome:
-                    if not checkin or checkin == item_checkin:
-                        match = True
+                if (nome in item_nome or item_nome in nome) and item_checkin == checkin:
+                    ids_to_delete.append((row_id, dados.get("nome", row_tipo), dados.get("checkin", "")))
+                continue
             
-            # Match by tipo + checkin
-            if tipo and checkin and not match:
-                if row_tipo == tipo and dados.get("checkin", "") == checkin:
-                    match = True
-            
-            if match:
-                ids_to_delete.append((row_id, dados.get("nome", row_tipo), dados.get("checkin", "")))
+            # Match by nome only (with tipo required for safety)
+            if nome and tipo:
+                item_nome = (dados.get("nome") or "").lower()
+                if (nome in item_nome or item_nome in nome) and row_tipo == tipo:
+                    ids_to_delete.append((row_id, dados.get("nome", row_tipo), dados.get("checkin", "")))
         
         if not ids_to_delete:
             cur.close(); conn.close()
-            return json.dumps({"resultado": "Nenhum item encontrado com esses criterios."})
+            return json.dumps({"resultado": "Nenhum item encontrado. Verifique os criterios."})
+        
+        # Safety check - never delete more than 5 items at once
+        if len(ids_to_delete) > 5:
+            cur.close(); conn.close()
+            found_names = [f"{n} ({c})" for _, n, c in ids_to_delete]
+            return json.dumps({
+                "erro": f"Encontrei {len(ids_to_delete)} itens - muitos para remover de uma vez. Seja mais especifico.",
+                "encontrados": found_names
+            }, ensure_ascii=False)
         
         removidos = []
         for del_id, del_nome, del_checkin in ids_to_delete:
