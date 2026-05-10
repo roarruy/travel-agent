@@ -471,24 +471,43 @@ def save_extracted_items(extracted: list) -> list:
                     f"{tipo.title()} {item.get('nome','')} "
                     f"{item.get('checkin','')}~{item.get('checkout','')} [{eid}]"
                 )
+            elif tipo == "milhas":
+                # Update profile with milhas balance
+                profile = load_profile()
+                programa = item.get("programa", "")
+                saldo = item.get("saldo", 0)
+                categoria = item.get("categoria", "")
+                if "LATAM" in programa or "latam" in programa.lower():
+                    profile["milhas"]["latam_pass"] = saldo
+                    if categoria:
+                        profile["categoria_latam"] = categoria
+                elif "Smiles" in programa or "smiles" in programa.lower():
+                    profile["milhas"]["smiles"] = saldo
+                    if categoria:
+                        profile["categoria_smiles"] = categoria
+                elif "Livelo" in programa or "livelo" in programa.lower():
+                    profile["milhas"]["livelo"] = saldo
+                elif "TudoAzul" in programa or "azul" in programa.lower():
+                    profile["milhas"]["tudoazul"] = saldo
+                save_profile(profile)
+                saved.append(f"Milhas {programa}: {saldo:,} pts categoria {categoria}")
         except Exception as e:
             logger.error(f"save_extracted_items erro {tipo}: {e}")
     return saved
 
 
 EXTRACTION_PROMPT = (
-    "Voce e um especialista em extrair dados de viagem de emails. "
-    "Analise CADA email com muito cuidado e extraia TODOS os compromissos fisicos: "
-    "voos (INCLUDING connections/escalas), hoteis, eventos, charters, veleiros, transfers, cursos, shows, ingressos. "
+    "Voce e um especialista em extrair dados de viagem e fidelidade de documentos e imagens. "
+    "Analise o conteudo e extraia TODOS os itens relevantes: "
+    "voos, hoteis, eventos, ingressos, transfers, charters, E TAMBEM saldos de milhas/pontos. "
     "IMPORTANTE: cada trecho de voo e um item separado. Ex: GRU->EWR e EWR->EGE sao 2 itens. "
-    "Procure por: localizadores/PNR (6 letras/numeros), datas, horarios, codigos IATA de aeroportos, numeros de confirmacao. "
     "Retorne SOMENTE um JSON array valido, sem markdown, sem texto extra. "
-    "Tipos aceitos: voo, hotel, evento, charter, veleiro, transfer. "
-    "Schema voo: {tipo,companhia,numero_voo,localizador,origem,destino,data,hora_partida,classe,assento}. "
-    "Schema hotel: {tipo,nome,checkin,checkout,confirmacao,endereco,cidade,pais}. "
-    "Schema outro: {tipo,nome,data_inicio,data_fim,local,cidade,confirmacao,detalhes,origem,destino}. "
-    "Datas YYYY-MM-DD. Horarios HH:MM. "
-    "Se nao houver viagens retorne []."
+    "Tipos aceitos: voo, hotel, evento, charter, veleiro, transfer, milhas. "
+    "Schema voo: {tipo,companhia,numero_voo,localizador,origem,destino,data:YYYY-MM-DD,hora_partida:HH:MM,classe,assento}. "
+    "Schema hotel: {tipo,nome,checkin:YYYY-MM-DD,checkout:YYYY-MM-DD,confirmacao,endereco,cidade}. "
+    "Schema milhas: {tipo:milhas,programa,saldo:numero,categoria,numero,titular}. "
+    "Schema outro: {tipo,nome,data_inicio:YYYY-MM-DD,data_fim:YYYY-MM-DD,local,cidade,confirmacao}. "
+    "Datas YYYY-MM-DD. Horarios HH:MM. Se nao houver nada relevante retorne []."
 )
 
 
