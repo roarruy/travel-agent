@@ -2646,14 +2646,30 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Envie uma imagem PNG, JPG ou um PDF.")
             return
 
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        import tempfile, imghdr
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as tmp:
             tmp_path = tmp.name
         await file.download_to_drive(tmp_path)
 
         with open(tmp_path, "rb") as f:
-            image_data = base64.b64encode(f.read()).decode("utf-8")
-        os.unlink(tmp_path)
+            image_bytes = f.read()
+        
+        # Detect actual image type
+        img_type = imghdr.what(None, h=image_bytes)
+        if img_type == "png":
+            media_type = "image/png"
+        elif img_type in ["jpeg", "jpg"]:
+            media_type = "image/jpeg"
+        elif img_type == "gif":
+            media_type = "image/gif"
+        elif img_type == "webp":
+            media_type = "image/webp"
+        else:
+            media_type = "image/jpeg"  # default
+        
+        image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
+        try: os.unlink(tmp_path)
+        except: pass
 
         await thinking.edit_text("🖼️ Imagem recebida! Extraindo informacoes de viagem...")
 
@@ -2669,7 +2685,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/jpeg",
+                            "media_type": media_type,
                             "data": image_data
                         }
                     },
