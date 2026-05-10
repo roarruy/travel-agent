@@ -2709,15 +2709,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     },
                     {
                         "type": "text",
-                        "text": (
-                            "Analise esta imagem e extraia TODAS as informacoes de viagem: "
-                            "voos, hoteis, eventos, ingressos, confirmacoes. "
-                            "Retorne APENAS um JSON array valido sem markdown. "
-                            'Schema voo: {"tipo":"voo","companhia":"","numero_voo":"","localizador":"","origem":"","destino":"","data":"YYYY-MM-DD","hora_partida":"HH:MM","classe":"","assento":""}. '
-                            'Schema hotel: {"tipo":"hotel","nome":"","checkin":"YYYY-MM-DD","checkout":"YYYY-MM-DD","confirmacao":"","endereco":"","cidade":""}. '
-                            'Schema evento: {"tipo":"evento","nome":"","data_inicio":"YYYY-MM-DD","data_fim":"YYYY-MM-DD","local":"","cidade":"","confirmacao":""}. '
-                            "Se nao houver viagens retorne []."
-                        )
+                        "text": EXTRACTION_PROMPT
                     }
                 ]
             }]
