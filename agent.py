@@ -1099,6 +1099,19 @@ TOOLS = [
         }
     },
     {
+        "name": "remover_item",
+        "description": "Remove um item especifico da carteira por nome, data de checkin ou confirmacao. Use quando usuario pedir para remover, deletar ou apagar um hotel ou voo especifico.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nome": {"type": "string", "description": "Nome do hotel ou companhia aerea"},
+                "checkin": {"type": "string", "description": "Data checkin YYYY-MM-DD"},
+                "confirmacao": {"type": "string", "description": "Numero de confirmacao"},
+                "tipo": {"type": "string", "description": "voo ou hotel"}
+            }
+        }
+    },
+    {
         "name": "limpar_duplicatas",
         "description": "Remove duplicatas da carteira de viagens mantendo apenas um registro de cada voo e hotel. Use quando usuario pedir para limpar, organizar ou remover duplicatas da carteira.",
         "input_schema": {"type": "object", "properties": {}}
@@ -1394,6 +1407,75 @@ async def tool_limpar_duplicatas(params: dict, profile: dict) -> str:
         logger.error(f"tool_limpar_duplicatas error: {e}")
         return json.dumps({"erro": str(e)})
 
+async def tool_remover_item(params: dict, profile: dict) -> str:
+    """Remove um item especifico da carteira por nome, data ou confirmacao."""
+    if not DATABASE_URL:
+        return json.dumps({"erro": "Banco nao configurado."})
+    
+    nome = params.get("nome", "").lower()
+    checkin = params.get("checkin", "")
+    confirmacao = params.get("confirmacao", "")
+    tipo = params.get("tipo", "")
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, tipo, dados FROM wallet ORDER BY criado_em")
+        rows = cur.fetchall()
+        
+        ids_to_delete = []
+        for row_id, row_tipo, dados_raw in rows:
+            try:
+                dados = dados_raw if isinstance(dados_raw, dict) else json.loads(dados_raw)
+            except:
+                continue
+            
+            match = False
+            
+            # Match by confirmacao
+            if confirmacao:
+                conf = (dados.get("confirmacao") or "").replace(".", "")
+                if confirmacao.replace(".", "") in conf or conf in confirmacao.replace(".", ""):
+                    match = True
+            
+            # Match by nome + checkin
+            if nome and not match:
+                item_nome = (dados.get("nome") or "").lower()
+                item_checkin = dados.get("checkin", "")
+                if nome in item_nome or item_nome in nome:
+                    if not checkin or checkin == item_checkin:
+                        match = True
+            
+            # Match by tipo + checkin
+            if tipo and checkin and not match:
+                if row_tipo == tipo and dados.get("checkin", "") == checkin:
+                    match = True
+            
+            if match:
+                ids_to_delete.append((row_id, dados.get("nome", row_tipo), dados.get("checkin", "")))
+        
+        if not ids_to_delete:
+            cur.close(); conn.close()
+            return json.dumps({"resultado": "Nenhum item encontrado com esses criterios."})
+        
+        removidos = []
+        for del_id, del_nome, del_checkin in ids_to_delete:
+            cur.execute("DELETE FROM wallet WHERE id = %s", (del_id,))
+            removidos.append(f"{del_nome} ({del_checkin})")
+        
+        conn.commit()
+        cur.close(); conn.close()
+        
+        return json.dumps({
+            "sucesso": True,
+            "removidos": removidos,
+            "mensagem": f"{len(removidos)} item(ns) removido(s): {', '.join(removidos)}"
+        }, ensure_ascii=False)
+        
+    except Exception as e:
+        logger.error(f"tool_remover_item error: {e}")
+        return json.dumps({"erro": str(e)})
+
 async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
     """Executa a ferramenta solicitada e retorna resultado como string."""
 
@@ -1415,6 +1497,8 @@ async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
         return await tool_buscar_por_localizador(tool_input, profile)
     elif tool_name == "alertas_e_monitoramento":
         return await tool_alertas(tool_input, profile)
+    elif tool_name == "remover_item":
+        return await tool_remover_item(tool_input, profile)
     elif tool_name == "limpar_duplicatas":
         return await tool_limpar_duplicatas(tool_input, profile)
     elif tool_name == "listar_inbox":
@@ -2000,6 +2084,7 @@ def build_system_prompt(profile: dict) -> str:
 - **MILHAS:** Qualquer pedido sobre milhas → chamar `conferir_milhas` OBRIGATORIAMENTE.
 - **REGISTRAR VIAGEM:** Usuário informou compra de passagem ou reserva → chamar `salvar_viagem` OBRIGATORIAMENTE.
 - **VER CARTEIRA:** "minhas viagens", "próximas viagens", "o que tenho marcado" → chamar `ver_carteira` OBRIGATORIAMENTE.
+- **REMOVER ITEM:** "remova", "delete", "apague" um hotel ou voo especifico → chamar `remover_item` com nome/checkin/confirmacao. NUNCA pergunte confirmacao antes de remover, apenas execute.
 - **LIMPAR DUPLICATAS:** "limpe duplicatas", "organize carteira", "remova repetidos" → chamar `limpar_duplicatas` OBRIGATORIAMENTE.
 - **LISTAR INBOX:** "liste meus emails", "o que tem na inbox", "mostre todos os emails" → chamar `listar_inbox` OBRIGATORIAMENTE.
 - **GMAIL:** Qualquer pedido para verificar email, importar viagens do Gmail, checar inbox → chamar `verificar_gmail` com acao="importar_para_carteira" OBRIGATORIAMENTE. Após receber os emails, use `salvar_viagem` para cada voo, hotel, ingresso ou evento encontrado AUTOMATICAMENTE, sem pedir confirmação. Informe o que foi importado ao final.
