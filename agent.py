@@ -813,10 +813,22 @@ async def check_and_send_alerts(app):
 
 
 async def scheduler_loop(app):
+    """Alertas a cada 15min. Gmail check 1x por dia as 8h."""
+    last_gmail_check = None
     while True:
         try:
+            # Alerts every 15 minutes
             await check_and_send_alerts(app)
-            await check_gmail_for_changes(app)
+            
+            # Gmail check once a day at 8am
+            from datetime import datetime as _dt
+            now = _dt.now()
+            if (last_gmail_check is None or 
+                (now - last_gmail_check).total_seconds() > 86400) and now.hour >= 8:
+                logger.info("Verificacao diaria do Gmail iniciada")
+                await check_gmail_for_changes(app)
+                last_gmail_check = now
+                
         except Exception as e:
             logger.error(f"Erro scheduler: {e}")
         await asyncio.sleep(900)
