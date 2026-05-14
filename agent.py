@@ -1581,13 +1581,14 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
         "MVD": "Montevideo", "ASU": "Assuncao",
     }
 
+    _airport_cache: dict = {}  # cache em memória: query → place dict
+
     def iata_to_query(code: str) -> list:
         """Retorna lista de queries para tentar, do mais específico ao mais genérico."""
         code_up = code.upper().strip()
         queries = []
         if code_up in IATA_NAMES:
             queries.append(IATA_NAMES[code_up])
-        # Sempre inclui o código original como fallback
         if len(code_up) == 3:
             queries.append(code_up)
         else:
@@ -1595,17 +1596,36 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
         return queries
 
     async def find_airport(client, headers, query_str: str):
-        """Busca aeroporto no Sky Scrapper, tenta múltiplas queries."""
+        """Busca aeroporto no Sky Scrapper. Usa cache para não repetir chamadas."""
+        cache_key = query_str.upper().strip()
+        if cache_key in _airport_cache:
+            logger.info(f"Aeroporto '{cache_key}' servido do cache")
+            return _airport_cache[cache_key], cache_key
+
         queries = iata_to_query(query_str)
         for q in queries:
             try:
+                await asyncio.sleep(0.4)  # evita rate limit em buscas consecutivas
                 r = await client.get(
                     "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchAirport",
                     headers=headers, params={"query": q, "locale": "pt-BR"})
-                data = r.json().get("data", [])
-                if data:
-                    logger.info(f"Aeroporto encontrado: query='{q}' -> {data[0].get('presentation',{}).get('title','')}")
-                    return data[0], q
+                if r.status_code == 429:
+                    logger.warning("Rate limit atingido na busca de aeroporto")
+                    break
+                places = r.json().get("data", [])
+                if places:
+                    p = places[0]
+                    fp = p.get("navigation", {}).get("relevantFlightParams", {})
+                    sky_id = fp.get("skyId", "")
+                    entity_id = fp.get("entityId", "")
+                    name = p.get("presentation", {}).get("title", q)
+                    if sky_id and entity_id:
+                        logger.info(f"Aeroporto: '{q}' → skyId={sky_id} nome='{name}'")
+                        p["_skyId"] = sky_id
+                        p["_entityId"] = entity_id
+                        p["_name"] = name
+                        _airport_cache[cache_key] = p  # salva no cache
+                        return p, q
             except Exception as e:
                 logger.warning(f"Airport search '{q}': {e}")
         return None, None
@@ -1627,13 +1647,13 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
             if not dest_place:
                 raise ValueError(f"Aeroporto de destino '{destino}' não encontrado no Skyscanner")
 
-            orig_sky    = orig_place.get("skyId", "")
-            orig_entity = orig_place.get("entityId", "")
-            dest_sky    = dest_place.get("skyId", "")
-            dest_entity = dest_place.get("entityId", "")
+            orig_sky    = orig_place.get("_skyId", "")
+            orig_entity = orig_place.get("_entityId", "")
+            dest_sky    = dest_place.get("_skyId", "")
+            dest_entity = dest_place.get("_entityId", "")
 
-            orig_nome = orig_place.get("presentation", {}).get("title", origem)
-            dest_nome = dest_place.get("presentation", {}).get("title", destino)
+            orig_nome = orig_place.get("_name", origem)
+            dest_nome = dest_place.get("_name", destino)
 
             logger.info(f"Buscando voos: {orig_nome} ({orig_sky}) -> {dest_nome} ({dest_sky})")
 
@@ -1651,10 +1671,11 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
                     headers=headers, params=flight_params)
             fl_data = fl_r.json()
 
-            itineraries = (fl_data.get("data", {}).get("itineraries") or
-                           fl_data.get("itineraries") or [])
+            ctx = fl_data.get("data", {})
+            itineraries = ctx.get("itineraries") or fl_data.get("itineraries") or []
+            api_status  = ctx.get("context", {}).get("status", "")
 
-            logger.info(f"Sky Scrapper retornou {len(itineraries)} itinerários")
+            logger.info(f"Sky Scrapper: status='{api_status}' | {len(itineraries)} itinerários")
 
             if itineraries:
                 opcoes = []
