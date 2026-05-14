@@ -1554,6 +1554,62 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
                  "executiva": "business", "primeira": "first"}
     cabin_class = cabin_map.get(classe, "economy")
 
+    # Mapeamento IATA -> nome para busca mais precisa no Sky Scrapper
+    IATA_NAMES = {
+        "GRU": "Guarulhos", "CGH": "Congonhas", "VCP": "Viracopos Campinas",
+        "GIG": "Rio de Janeiro Galeao", "SDU": "Rio de Janeiro Santos Dumont",
+        "BSB": "Brasilia", "CNF": "Belo Horizonte Confins", "PLU": "Pampulha",
+        "SSA": "Salvador", "REC": "Recife", "FOR": "Fortaleza",
+        "MAO": "Manaus", "BEL": "Belem", "MCZ": "Maceio",
+        "NAT": "Natal", "CWB": "Curitiba", "POA": "Porto Alegre",
+        "FLN": "Florianopolis", "VIX": "Vitoria", "CGB": "Cuiaba",
+        "PVH": "Porto Velho", "RBR": "Rio Branco", "GYN": "Goiania",
+        "THE": "Teresina", "SLZ": "Sao Luis", "JPA": "Joao Pessoa",
+        "AJU": "Aracaju", "PMW": "Palmas", "MCP": "Macapa",
+        "ARU": "Aracatuba", "BAU": "Bauru", "JTC": "Bauru Arealva",
+        "CGR": "Campo Grande", "CXJ": "Caxias do Sul", "LDB": "Londrina",
+        "MGF": "Maringa", "PPB": "Presidente Prudente", "RAO": "Ribeirao Preto",
+        "SJP": "Sao Jose do Rio Preto", "STM": "Santarem", "UDI": "Uberlandia",
+        "MIA": "Miami", "JFK": "New York JFK", "GRU": "Guarulhos",
+        "LIS": "Lisboa", "OPO": "Porto", "MAD": "Madrid",
+        "BCN": "Barcelona", "LHR": "Londres Heathrow", "CDG": "Paris Charles de Gaulle",
+        "FCO": "Roma Fiumicino", "MXP": "Milao Malpensa", "AMS": "Amsterdam",
+        "EWR": "New York Newark", "LAX": "Los Angeles", "ORD": "Chicago",
+        "MXP": "Milan", "ZRH": "Zurich", "FRA": "Frankfurt",
+        "DXB": "Dubai", "DOH": "Doha", "SCL": "Santiago Chile",
+        "EZE": "Buenos Aires", "BOG": "Bogota", "LIM": "Lima",
+        "MVD": "Montevideo", "ASU": "Assuncao",
+    }
+
+    def iata_to_query(code: str) -> list:
+        """Retorna lista de queries para tentar, do mais específico ao mais genérico."""
+        code_up = code.upper().strip()
+        queries = []
+        if code_up in IATA_NAMES:
+            queries.append(IATA_NAMES[code_up])
+        # Sempre inclui o código original como fallback
+        if len(code_up) == 3:
+            queries.append(code_up)
+        else:
+            queries.append(code)
+        return queries
+
+    async def find_airport(client, headers, query_str: str):
+        """Busca aeroporto no Sky Scrapper, tenta múltiplas queries."""
+        queries = iata_to_query(query_str)
+        for q in queries:
+            try:
+                r = await client.get(
+                    "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchAirport",
+                    headers=headers, params={"query": q, "locale": "pt-BR"})
+                data = r.json().get("data", [])
+                if data:
+                    logger.info(f"Aeroporto encontrado: query='{q}' -> {data[0].get('presentation',{}).get('title','')}")
+                    return data[0], q
+            except Exception as e:
+                logger.warning(f"Airport search '{q}': {e}")
+        return None, None
+
     # ── Sky Scrapper via RapidAPI ────────────────────────────────────────────
     if RAPIDAPI_KEY:
         try:
@@ -1561,24 +1617,25 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
                 "x-rapidapi-key": RAPIDAPI_KEY.strip(),
                 "x-rapidapi-host": "sky-scrapper.p.rapidapi.com"
             }
+
             async with httpx.AsyncClient(timeout=20) as client:
-                orig_r = await client.get(
-                    "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchAirport",
-                    headers=headers, params={"query": origem, "locale": "pt-BR"})
-                dest_r = await client.get(
-                    "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchAirport",
-                    headers=headers, params={"query": destino, "locale": "pt-BR"})
+                orig_place, orig_query = await find_airport(client, headers, origem)
+                dest_place, dest_query = await find_airport(client, headers, destino)
 
-            orig_places = orig_r.json().get("data", [])
-            dest_places = dest_r.json().get("data", [])
+            if not orig_place:
+                raise ValueError(f"Aeroporto de origem '{origem}' não encontrado no Skyscanner")
+            if not dest_place:
+                raise ValueError(f"Aeroporto de destino '{destino}' não encontrado no Skyscanner")
 
-            if not orig_places or not dest_places:
-                raise ValueError("Aeroporto não encontrado na Sky Scrapper")
+            orig_sky    = orig_place.get("skyId", "")
+            orig_entity = orig_place.get("entityId", "")
+            dest_sky    = dest_place.get("skyId", "")
+            dest_entity = dest_place.get("entityId", "")
 
-            orig_sky    = orig_places[0].get("skyId", "")
-            orig_entity = orig_places[0].get("entityId", "")
-            dest_sky    = dest_places[0].get("skyId", "")
-            dest_entity = dest_places[0].get("entityId", "")
+            orig_nome = orig_place.get("presentation", {}).get("title", origem)
+            dest_nome = dest_place.get("presentation", {}).get("title", destino)
+
+            logger.info(f"Buscando voos: {orig_nome} ({orig_sky}) -> {dest_nome} ({dest_sky})")
 
             flight_params = {
                 "originSkyId": orig_sky, "destinationSkyId": dest_sky,
@@ -1588,7 +1645,7 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
                 "locale": "pt-BR", "market": "BR", "countryCode": "BR"
             }
 
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=35) as client:
                 fl_r = await client.get(
                     "https://sky-scrapper.p.rapidapi.com/api/v2/flights/searchFlights",
                     headers=headers, params=flight_params)
@@ -1596,6 +1653,8 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
 
             itineraries = (fl_data.get("data", {}).get("itineraries") or
                            fl_data.get("itineraries") or [])
+
+            logger.info(f"Sky Scrapper retornou {len(itineraries)} itinerários")
 
             if itineraries:
                 opcoes = []
@@ -1623,51 +1682,50 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
                     voo_num = segs[0].get("flightNumber", "") if segs else ""
 
                     opcoes.append({
-                        "companhia":    companhia,
-                        "numero_voo":   voo_num,
-                        "saida":        saida,
-                        "chegada":      chegada,
-                        "duracao":      duracao,
-                        "escalas":      stops,
-                        "preco_total":  preco,
+                        "companhia":       companhia,
+                        "numero_voo":      voo_num,
+                        "saida":           saida,
+                        "chegada":         chegada,
+                        "duracao":         duracao,
+                        "escalas":         stops,
+                        "preco_total":     preco,
                         "preco_formatado": preco_fmt,
-                        "bagagem":      "Verificar ao reservar"
+                        "bagagem":         "Verificar ao reservar"
                     })
 
                 if opcoes:
                     result = {
-                        "busca":   f"{origem} → {destino} | {data_ida}" + (f" → {data_volta}" if data_volta else ""),
-                        "classe":  classe,
-                        "adultos": adultos,
-                        "opcoes":  opcoes,
-                        "moeda":   "BRL",
-                        "fonte":   "✅ Dados reais via Skyscanner/RapidAPI"
+                        "busca":        f"{orig_nome} → {dest_nome} | {data_ida}" + (f" → {data_volta}" if data_volta else ""),
+                        "classe":       classe,
+                        "adultos":      adultos,
+                        "opcoes":       opcoes,
+                        "moeda":        "BRL",
+                        "fonte":        "✅ Dados reais via Skyscanner/RapidAPI"
                     }
+                    # Busca retorno se solicitado
                     if data_volta:
-                        # Busca retorno
                         try:
                             fp2 = {**flight_params,
                                    "originSkyId": dest_sky, "destinationSkyId": orig_sky,
                                    "originEntityId": dest_entity, "destinationEntityId": orig_entity,
                                    "date": data_volta}
-                            async with httpx.AsyncClient(timeout=30) as client:
+                            async with httpx.AsyncClient(timeout=35) as client:
                                 fl_r2 = await client.get(
                                     "https://sky-scrapper.p.rapidapi.com/api/v2/flights/searchFlights",
                                     headers=headers, params=fp2)
                             its2 = (fl_r2.json().get("data", {}).get("itineraries") or [])
                             if its2:
-                                leg2  = its2[0].get("legs", [{}])[0]
-                                segs2 = leg2.get("segments", [])
-                                mkt2  = leg2.get("carriers", {}).get("marketing", [{}])
-                                dep2  = leg2.get("departure", "")
-                                arr2  = leg2.get("arrival", "")
-                                dur2  = leg2.get("durationInMinutes", 0)
+                                leg2 = its2[0].get("legs", [{}])[0]
+                                mkt2 = leg2.get("carriers", {}).get("marketing", [{}])
+                                dep2 = leg2.get("departure", "")
+                                arr2 = leg2.get("arrival", "")
+                                dur2 = leg2.get("durationInMinutes", 0)
                                 result["volta"] = {
-                                    "companhia": mkt2[0].get("name","") if mkt2 else "",
-                                    "saida":  dep2[11:16] if len(dep2) > 10 else dep2,
-                                    "chegada": arr2[11:16] if len(arr2) > 10 else arr2,
-                                    "duracao": f"{dur2//60}h{dur2%60:02d}" if dur2 else "N/D",
-                                    "escalas": leg2.get("stopCount", 0),
+                                    "companhia":       mkt2[0].get("name","") if mkt2 else "",
+                                    "saida":           dep2[11:16] if len(dep2) > 10 else dep2,
+                                    "chegada":         arr2[11:16] if len(arr2) > 10 else arr2,
+                                    "duracao":         f"{dur2//60}h{dur2%60:02d}" if dur2 else "N/D",
+                                    "escalas":         leg2.get("stopCount", 0),
                                     "preco_formatado": its2[0].get("price",{}).get("formatted","")
                                 }
                         except Exception as ev:
@@ -1675,25 +1733,42 @@ async def tool_buscar_voos(params: dict, profile: dict) -> str:
 
                     return json.dumps(result, ensure_ascii=False, indent=2)
 
-        except Exception as e:
-            logger.warning(f"Sky Scrapper error: {e} — usando fallback")
+            # API respondeu mas sem itinerários — aeroporto regional sem cobertura
+            raise ValueError(f"Sem voos disponíveis no Skyscanner para {orig_nome} → {dest_nome} em {data_ida}. "
+                             f"Este trecho pode não ter cobertura na API (aeroporto regional).")
 
-    # ── Fallback: links diretos ──────────────────────────────────────────────
-    orig_q  = origem.replace(" ", "+")
-    dest_q  = destino.replace(" ", "+")
-    gf_link = (f"https://www.google.com/travel/flights/search?"
-               f"q=voos+de+{orig_q}+para+{dest_q}+em+{data_ida}&hl=pt-BR")
+        except ValueError as ve:
+            # Erro de negócio — mostrar ao usuário com links de fallback
+            logger.warning(f"Sky Scrapper sem resultado: {ve}")
+            erro_msg = str(ve)
+        except Exception as e:
+            logger.error(f"Sky Scrapper erro técnico: {type(e).__name__}: {e}")
+            erro_msg = "Erro técnico na API de voos."
+
+    else:
+        erro_msg = "RAPIDAPI_KEY não configurada."
+
+    # ── Fallback com links diretos ───────────────────────────────────────────
+    orig_iata = origem.upper()[:3]
+    dest_iata = destino.upper()[:3]
+    data_fmt  = data_ida.replace("-","")
+
+    links = {
+        "google_flights": (f"https://www.google.com/travel/flights/search?"
+                           f"q=voos+de+{orig_iata}+para+{dest_iata}+em+{data_ida}&hl=pt-BR"),
+        "azul":  (f"https://www.voeazul.com.br/selecao-voo?"
+                  f"ida={orig_iata}-{dest_iata}-{data_fmt}&adultos={adultos}"),
+        "latam": (f"https://www.latamairlines.com/br/pt/oferta-voos?"
+                  f"origin={orig_iata}&destination={dest_iata}&outbound={data_ida}&adt={adultos}"),
+        "gol":   (f"https://comprar.voegol.com.br/Compra/Disponibilidade?"
+                  f"from={orig_iata}&to={dest_iata}&departure={data_fmt}&adults={adultos}")
+    }
 
     return json.dumps({
-        "busca":   f"{origem} → {destino} | {data_ida}",
-        "aviso":   "⚠️ RAPIDAPI_KEY não configurada ou Sky Scrapper indisponível.",
-        "acao":    "Assine a API gratuita em rapidapi.com/apiheya/api/sky-scrapper",
-        "fallback_links": {
-            "google_flights": gf_link,
-            "azul":  f"https://www.voeazul.com.br/selecao-voo",
-            "latam": f"https://www.latamairlines.com/br/pt/oferta-voos?origin={origem[:3].upper()}&destination={destino[:3].upper()}&outbound={data_ida}",
-            "gol":   f"https://comprar.voegol.com.br/Compra/Disponibilidade?from={origem[:3].upper()}&to={destino[:3].upper()}&departure={data_ida.replace('-','')}"
-        }
+        "busca":          f"{origem} → {destino} | {data_ida}",
+        "aviso":          f"⚠️ {erro_msg}",
+        "instrucao":      "Apresente os links abaixo de forma clara e clicável para o usuário cotar diretamente.",
+        "links_diretos":  links
     }, ensure_ascii=False, indent=2)
 
 async def tool_buscar_milhas_voo(params: dict, profile: dict) -> str:
