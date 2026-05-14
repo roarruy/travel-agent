@@ -42,6 +42,7 @@ AUTHORIZED_USERS = [int(x) for x in os.getenv("AUTHORIZED_USERS", "0").split(","
 
 PROFILE_PATH = "data/profile.json"
 HISTORY_PATH = "data/history.json"
+WALLET_PATH  = "data/wallet.json"
 
 # ─────────────────────────────────────────────
 # PERFIL DO VIAJANTE
@@ -641,38 +642,6 @@ async def scan_gmail_for_travel(max_results=50):
         logger.error(f"Erro Gmail scan: {type(e).__name__}: {e}")
         return [{"erro": f"{type(e).__name__}: {str(e)}"}]
 
-    if not GMAIL_REFRESH_TOKEN:
-        return [{"erro": "Gmail nao configurado."}]
-    try:
-        import warnings
-        warnings.filterwarnings("ignore")
-        service = get_gmail_service()
-        logger.info("Gmail service criado com sucesso")
-        # Lê toda a caixa de entrada — o usuário mantém lá apenas emails relevantes de viagem
-        query = "in:inbox newer_than:180d"
-        results = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
-        messages = results.get("messages", [])
-        logger.info(f"Gmail: {len(messages)} emails encontrados")
-        emails = []
-        for msg_ref in messages[:max_results]:
-            try:
-                msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
-                headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-                body = extract_email_body(msg)
-                emails.append({
-                    "id": msg_ref["id"],
-                    "assunto": headers.get("Subject", ""),
-                    "de": headers.get("From", ""),
-                    "data_email": headers.get("Date", ""),
-                    "corpo": body  # Full body for better extraction
-                })
-            except Exception as e:
-                logger.error(f"Erro ao ler email {msg_ref['id']}: {e}")
-                continue
-        return emails
-    except Exception as e:
-        logger.error(f"Erro Gmail scan DETALHADO: {type(e).__name__}: {e}")
-        return [{"erro": f"{type(e).__name__}: {str(e)}"}]
 
 async def check_gmail_for_changes(app):
     if not AUTHORIZED_USERS or AUTHORIZED_USERS == [0] or not GMAIL_REFRESH_TOKEN:
@@ -1571,73 +1540,161 @@ async def execute_tool(tool_name: str, tool_input: dict, profile: dict) -> str:
 
 async def tool_buscar_voos(params: dict, profile: dict) -> str:
     """
-    Busca voos via Amadeus API ou retorna dados simulados para demonstração.
-    Em produção: integrar com amadeus-python SDK ou requests para /v2/shopping/flight-offers
+    Busca voos reais via Sky Scrapper (Skyscanner / RapidAPI).
+    Fallback: links diretos para Google Flights e companhias principais.
     """
-    origem = params.get("origem", "GRU")
+    origem  = params.get("origem", "GRU")
     destino = params.get("destino", "")
-    data_ida = params.get("data_ida", "")
+    data_ida   = params.get("data_ida", "")
     data_volta = params.get("data_volta")
-    classe = params.get("classe", "economica")
+    classe  = params.get("classe", "economica")
     adultos = params.get("adultos", 1)
 
-    # ── PRODUÇÃO: Substituir pelo código abaixo ──────────────────────────────
-    # import amadeus
-    # client = amadeus.Client(client_id=AMADEUS_CLIENT_ID, client_secret=AMADEUS_CLIENT_SECRET)
-    # response = client.shopping.flight_offers_search.get(
-    #     originLocationCode=origem, destinationLocationCode=destino,
-    #     departureDate=data_ida, adults=adultos, travelClass=classe.upper()
-    # )
-    # Processar response.data e formatar resultado
-    # ────────────────────────────────────────────────────────────────────────
+    cabin_map = {"economica": "economy", "premium_economy": "premium_economy",
+                 "executiva": "business", "primeira": "first"}
+    cabin_class = cabin_map.get(classe, "economy")
 
-    # Dados simulados realistas para demonstração
-    results = {
-        "busca": f"{origem} → {destino} | {data_ida}" + (f" → {data_volta}" if data_volta else " (só ida)"),
-        "classe": classe,
-        "opcoes": [
-            {
-                "companhia": "LATAM",
-                "numero_voo": "LA3251",
-                "saida": "06:30",
-                "chegada": "08:15" if destino in ["GIG", "BSB"] else "14:45",
-                "duracao": "1h45" if destino in ["GIG", "BSB"] else "10h15",
-                "escalas": 0,
-                "preco_pp": 689 if classe == "economica" else 4200,
-                "preco_total": (689 if classe == "economica" else 4200) * adultos,
-                "bagagem": "1 mala 23kg inclusa",
-                "cancelamento": "Gratuito até 24h"
-            },
-            {
-                "companhia": "GOL",
-                "numero_voo": "G31085",
-                "saida": "08:10",
-                "chegada": "09:55" if destino in ["GIG", "BSB"] else "18:30",
-                "duracao": "1h45" if destino in ["GIG", "BSB"] else "12h20",
-                "escalas": 0 if destino in ["GIG", "BSB"] else 1,
-                "preco_pp": 612 if classe == "economica" else 3890,
-                "preco_total": (612 if classe == "economica" else 3890) * adultos,
-                "bagagem": "Apenas bagagem de mão",
-                "cancelamento": "Pago"
-            },
-            {
-                "companhia": "Azul",
-                "numero_voo": "AD4720",
-                "saida": "11:40",
-                "chegada": "13:30" if destino in ["GIG", "BSB"] else "20:10",
-                "duracao": "1h50" if destino in ["GIG", "BSB"] else "10h30",
-                "escalas": 0,
-                "preco_pp": 731 if classe == "economica" else 4100,
-                "preco_total": (731 if classe == "economica" else 4100) * adultos,
-                "bagagem": "1 mala 23kg inclusa",
-                "cancelamento": "Gratuito até 48h"
+    # ── Sky Scrapper via RapidAPI ────────────────────────────────────────────
+    if RAPIDAPI_KEY:
+        try:
+            headers = {
+                "x-rapidapi-key": RAPIDAPI_KEY.strip(),
+                "x-rapidapi-host": "sky-scrapper.p.rapidapi.com"
             }
-        ],
-        "moeda": "BRL",
-        "nota": "⚠️ Preços simulados para demonstração. Em produção, conectar à API Amadeus."
-    }
-    return json.dumps(results, ensure_ascii=False, indent=2)
+            async with httpx.AsyncClient(timeout=20) as client:
+                orig_r = await client.get(
+                    "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchAirport",
+                    headers=headers, params={"query": origem, "locale": "pt-BR"})
+                dest_r = await client.get(
+                    "https://sky-scrapper.p.rapidapi.com/api/v1/flights/searchAirport",
+                    headers=headers, params={"query": destino, "locale": "pt-BR"})
 
+            orig_places = orig_r.json().get("data", [])
+            dest_places = dest_r.json().get("data", [])
+
+            if not orig_places or not dest_places:
+                raise ValueError("Aeroporto não encontrado na Sky Scrapper")
+
+            orig_sky    = orig_places[0].get("skyId", "")
+            orig_entity = orig_places[0].get("entityId", "")
+            dest_sky    = dest_places[0].get("skyId", "")
+            dest_entity = dest_places[0].get("entityId", "")
+
+            flight_params = {
+                "originSkyId": orig_sky, "destinationSkyId": dest_sky,
+                "originEntityId": orig_entity, "destinationEntityId": dest_entity,
+                "date": data_ida, "adults": str(adultos),
+                "cabinClass": cabin_class, "currency": "BRL",
+                "locale": "pt-BR", "market": "BR", "countryCode": "BR"
+            }
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                fl_r = await client.get(
+                    "https://sky-scrapper.p.rapidapi.com/api/v2/flights/searchFlights",
+                    headers=headers, params=flight_params)
+            fl_data = fl_r.json()
+
+            itineraries = (fl_data.get("data", {}).get("itineraries") or
+                           fl_data.get("itineraries") or [])
+
+            if itineraries:
+                opcoes = []
+                for it in itineraries[:6]:
+                    legs = it.get("legs", [])
+                    if not legs:
+                        continue
+                    leg  = legs[0]
+                    segs = leg.get("segments", [])
+                    mkt  = leg.get("carriers", {}).get("marketing", [{}])
+                    companhia = mkt[0].get("name", "") if mkt else ""
+                    if not companhia and segs:
+                        companhia = (segs[0].get("marketingCarrier") or {}).get("name", "")
+
+                    preco     = it.get("price", {}).get("raw", 0)
+                    preco_fmt = it.get("price", {}).get("formatted", f"R$ {preco:.0f}")
+                    dep       = leg.get("departure", "")
+                    arr       = leg.get("arrival", "")
+                    dur_min   = leg.get("durationInMinutes", 0)
+                    stops     = leg.get("stopCount", 0)
+
+                    saida   = dep[11:16] if len(dep) > 10 else dep
+                    chegada = arr[11:16] if len(arr) > 10 else arr
+                    duracao = f"{dur_min // 60}h{dur_min % 60:02d}" if dur_min else "N/D"
+                    voo_num = segs[0].get("flightNumber", "") if segs else ""
+
+                    opcoes.append({
+                        "companhia":    companhia,
+                        "numero_voo":   voo_num,
+                        "saida":        saida,
+                        "chegada":      chegada,
+                        "duracao":      duracao,
+                        "escalas":      stops,
+                        "preco_total":  preco,
+                        "preco_formatado": preco_fmt,
+                        "bagagem":      "Verificar ao reservar"
+                    })
+
+                if opcoes:
+                    result = {
+                        "busca":   f"{origem} → {destino} | {data_ida}" + (f" → {data_volta}" if data_volta else ""),
+                        "classe":  classe,
+                        "adultos": adultos,
+                        "opcoes":  opcoes,
+                        "moeda":   "BRL",
+                        "fonte":   "✅ Dados reais via Skyscanner/RapidAPI"
+                    }
+                    if data_volta:
+                        # Busca retorno
+                        try:
+                            fp2 = {**flight_params,
+                                   "originSkyId": dest_sky, "destinationSkyId": orig_sky,
+                                   "originEntityId": dest_entity, "destinationEntityId": orig_entity,
+                                   "date": data_volta}
+                            async with httpx.AsyncClient(timeout=30) as client:
+                                fl_r2 = await client.get(
+                                    "https://sky-scrapper.p.rapidapi.com/api/v2/flights/searchFlights",
+                                    headers=headers, params=fp2)
+                            its2 = (fl_r2.json().get("data", {}).get("itineraries") or [])
+                            if its2:
+                                leg2  = its2[0].get("legs", [{}])[0]
+                                segs2 = leg2.get("segments", [])
+                                mkt2  = leg2.get("carriers", {}).get("marketing", [{}])
+                                dep2  = leg2.get("departure", "")
+                                arr2  = leg2.get("arrival", "")
+                                dur2  = leg2.get("durationInMinutes", 0)
+                                result["volta"] = {
+                                    "companhia": mkt2[0].get("name","") if mkt2 else "",
+                                    "saida":  dep2[11:16] if len(dep2) > 10 else dep2,
+                                    "chegada": arr2[11:16] if len(arr2) > 10 else arr2,
+                                    "duracao": f"{dur2//60}h{dur2%60:02d}" if dur2 else "N/D",
+                                    "escalas": leg2.get("stopCount", 0),
+                                    "preco_formatado": its2[0].get("price",{}).get("formatted","")
+                                }
+                        except Exception as ev:
+                            logger.warning(f"Erro busca retorno: {ev}")
+
+                    return json.dumps(result, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            logger.warning(f"Sky Scrapper error: {e} — usando fallback")
+
+    # ── Fallback: links diretos ──────────────────────────────────────────────
+    orig_q  = origem.replace(" ", "+")
+    dest_q  = destino.replace(" ", "+")
+    gf_link = (f"https://www.google.com/travel/flights/search?"
+               f"q=voos+de+{orig_q}+para+{dest_q}+em+{data_ida}&hl=pt-BR")
+
+    return json.dumps({
+        "busca":   f"{origem} → {destino} | {data_ida}",
+        "aviso":   "⚠️ RAPIDAPI_KEY não configurada ou Sky Scrapper indisponível.",
+        "acao":    "Assine a API gratuita em rapidapi.com/apiheya/api/sky-scrapper",
+        "fallback_links": {
+            "google_flights": gf_link,
+            "azul":  f"https://www.voeazul.com.br/selecao-voo",
+            "latam": f"https://www.latamairlines.com/br/pt/oferta-voos?origin={origem[:3].upper()}&destination={destino[:3].upper()}&outbound={data_ida}",
+            "gol":   f"https://comprar.voegol.com.br/Compra/Disponibilidade?from={origem[:3].upper()}&to={destino[:3].upper()}&departure={data_ida.replace('-','')}"
+        }
+    }, ensure_ascii=False, indent=2)
 
 async def tool_buscar_milhas_voo(params: dict, profile: dict) -> str:
     """
@@ -2210,6 +2267,26 @@ async def run_agent(user_message: str, profile: dict, history: list) -> str:
 # ─────────────────────────────────────────────
 # HANDLERS DO TELEGRAM
 # ─────────────────────────────────────────────
+def _split_markdown(text: str, limit: int = 4000) -> list:
+    """Divide texto longo respeitando blocos markdown."""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    while text:
+        if len(text) <= limit:
+            parts.append(text)
+            break
+        cut = text.rfind('\n', 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunk = text[:cut]
+        if chunk.count('*') % 2 != 0:
+            chunk += '*'
+        parts.append(chunk)
+        text = text[cut:].lstrip('\n')
+    return parts
+
+
 def is_authorized(update: Update) -> bool:
     user_id = update.effective_user.id
     if AUTHORIZED_USERS == [0]:
@@ -2326,11 +2403,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Telegram tem limite de 4096 chars por mensagem
         if len(response) > 4000:
-            partes = [response[i:i+4000] for i in range(0, len(response), 4000)]
+            partes = _split_markdown(response, 4000)
             for parte in partes:
-                await update.message.reply_text(parte, parse_mode="Markdown")
+                await update.message.reply_text(parte, parse_mode="Markdown", disable_web_page_preview=True)
         else:
-            await update.message.reply_text(response, parse_mode="Markdown")
+            await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         await thinking_msg.delete()
@@ -2439,10 +2516,10 @@ async def handle_voice(update, context):
         save_history(history)
         await thinking.delete()
         if len(response) > 4000:
-            for parte in [response[i:i+4000] for i in range(0, len(response), 4000)]:
-                await update.message.reply_text(parte, parse_mode="Markdown")
+            for parte in _split_markdown(response, 4000):
+                await update.message.reply_text(parte, parse_mode="Markdown", disable_web_page_preview=True)
         else:
-            await update.message.reply_text(response, parse_mode="Markdown")
+            await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Erro voz: {e}")
         try:
@@ -2781,6 +2858,7 @@ def main():
     app.add_handler(CommandHandler("perfil", cmd_perfil))
     app.add_handler(CommandHandler("carteira", cmd_carteira))
     app.add_handler(CommandHandler("ajuda", cmd_ajuda))
+    app.add_handler(CommandHandler("gmail", cmd_gmail))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
